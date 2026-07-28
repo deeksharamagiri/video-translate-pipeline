@@ -1,12 +1,3 @@
-# Offline Field Translator
-
-A complete implementation of the "End-to-End Pipeline — Office Processing →
-Offline Delivery" architecture: upload a video/audio file, and it walks
-through all 5 stages exactly as drawn, producing subtitles, a job report,
-and (optionally) burned-in / voiceover video. Everything needed to run it —
-FFmpeg binaries, ML models, TTS voices — downloads itself automatically the
-first time it's actually used. No separate setup script.
-
 ## What's actually in this build
 
 | Diagram box | File |
@@ -23,18 +14,6 @@ first time it's actually used. No separate setup script.
 | Output folder → USB / offline playback | `jobs/<job_id>/output/` |
 | Everything wired together | `pipeline/orchestrator.py` |
 | Web UI + upload + progress + downloads | `app.py`, `static/` |
-
-
-- Every `.py` file compiles cleanly (`py_compile`), zero syntax errors.
-- Stage 1 ran for real against a generated test WAV: it correctly measured
-  SNR and auto-denoised.
-- Stages 3 → 4 → 5 → job report ran for real end-to-end with mock transcript
-  text: segmentation, sentence-boundary splitting, 42-char/2-line subtitle
-  wrapping, DOCX report generation, and — critically — **a second identical
-  run hit the translation-memory cache 100% of the time**, proving the reuse
-  logic that's supposed to make repeat jobs >30% faster actually works.
-- The Flask server boots, serves the UI, CSS, JS, and API routes (all `200`).
-
 
 ---
 
