@@ -1,0 +1,7 @@
+{
+  "_readme": "Add domain-specific terms that must NEVER be translated freely (brand names, technical terms, proper nouns). Format: { 'source_term': { 'lang_code': 'forced_translation' } }. Matching is case-insensitive whole-word.",
+  "IndicTrans2": { "hin": "IndicTrans2", "mar": "IndicTrans2" },
+  "GST": { "hin": "जीएसटी", "mar": "जीएसटी" },
+  "Aadhaar": { "hin": "आधार", "mar": "आधार" },
+  "UPI": { "hin": "यूपीआई", "mar": "यूपीआई" }
+}

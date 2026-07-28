@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Offline Field Translator</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="scanline"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="brand-mark">◆</span>
+      <div>
+        <div class="brand-title">FIELD TRANSLATOR</div>
+        <div class="brand-sub">Office Processing → Offline Delivery</div>
+      </div>
+    </div>
+    <div class="net-status" id="netStatus">
+      <span class="dot"></span> LOCAL / OFFLINE-READY
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section class="panel upload-panel">
+    <h2><span class="tag">01</span> Load Source Media</h2>
+
+    <div class="dropzone" id="dropzone">
+      <input type="file" id="fileInput" accept=".mp4,.mkv,.mp3,.wav,.ogg" hidden>
+      <div class="dz-content">
+        <div class="dz-icon">⬆</div>
+        <p class="dz-text">Drop a video or audio file, or <span class="link">browse</span></p>
+        <p class="dz-hint">Video: MP4/MKV · up to 15 min / 200 MB &nbsp;|&nbsp; Audio: MP3/WAV/OGG · up to 30 min / 150 MB</p>
+      </div>
+      <div class="dz-file" id="dzFile" hidden>
+        <span id="dzFileName"></span>
+        <button id="dzClear" class="btn-ghost" type="button">✕</button>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <label class="field">
+        <span>Source language (leave blank to auto-detect)</span>
+        <select id="sourceLang">
+          <option value="">Auto-detect</option>
+          <option value="hin">Hindi</option>
+          <option value="mar">Marathi</option>
+          <option value="ben">Bengali</option>
+          <option value="tam">Tamil</option>
+          <option value="tel">Telugu</option>
+          <option value="kan">Kannada</option>
+          <option value="mal">Malayalam</option>
+          <option value="guj">Gujarati</option>
+          <option value="pan">Punjabi</option>
+          <option value="urd">Urdu</option>
+          <option value="eng">English</option>
+          <option value="fra">French</option>
+          <option value="spa">Spanish</option>
+          <option value="ara">Arabic</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Target language</span>
+        <select id="targetLang">
+          <option value="hin">Hindi</option>
+          <option value="eng">English</option>
+          <option value="mar">Marathi</option>
+          <option value="ben">Bengali</option>
+          <option value="tam">Tamil</option>
+          <option value="tel">Telugu</option>
+          <option value="kan">Kannada</option>
+          <option value="mal">Malayalam</option>
+          <option value="guj">Gujarati</option>
+          <option value="pan">Punjabi</option>
+          <option value="urd">Urdu</option>
+          <option value="fra">French</option>
+          <option value="spa">Spanish</option>
+          <option value="ara">Arabic</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="grid2">
+      <label class="field">
+        <span>Translation engine</span>
+        <select id="engineChoice">
+          <option value="auto">Auto (per architecture diagram)</option>
+          <option value="nllb">Force NLLB-200-distilled-600M</option>
+          <option value="indictrans2">Force IndicTrans2</option>
+        </select>
+      </label>
+      <div></div>
+    </div>
+
+    <div class="grid2">
+      <label class="check">
+        <input type="checkbox" id="wantBurnedIn">
+        <span>Generate burned-in subtitle MP4 <em>(video only)</em></span>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="wantVoiceover">
+        <span>Generate voiceover MP4 (Piper TTS) <em>(video only)</em></span>
+      </label>
+    </div>
+
+    <button id="submitBtn" class="btn-primary" disabled>Run Pipeline</button>
+    <p class="error" id="formError" hidden></p>
+  </section>
+
+  <section class="panel pipeline-panel" id="pipelinePanel" hidden>
+    <h2><span class="tag">02</span> Pipeline Progress</h2>
+    <div class="pipeline-track" id="pipelineTrack">
+      <div class="stage" data-stage="stage1"><div class="stage-dot"></div><div class="stage-label">Pre-Processing</div></div>
+      <div class="stage" data-stage="asr"><div class="stage-dot"></div><div class="stage-label">ASR / Subtitle Extract</div></div>
+      <div class="stage" data-stage="stage3"><div class="stage-dot"></div><div class="stage-label">Segment + TM Check</div></div>
+      <div class="stage" data-stage="translate"><div class="stage-dot"></div><div class="stage-label">Translate</div></div>
+      <div class="stage" data-stage="stage4"><div class="stage-dot"></div><div class="stage-label">Subtitle Gen</div></div>
+      <div class="stage" data-stage="stage5"><div class="stage-dot"></div><div class="stage-label">Archive & Reuse</div></div>
+      <div class="stage" data-stage="done"><div class="stage-dot"></div><div class="stage-label">Delivery</div></div>
+    </div>
+    <div class="progress-bar-outer"><div class="progress-bar-inner" id="progressBarInner"></div></div>
+    <p class="progress-msg" id="progressMsg">Waiting...</p>
+  </section>
+
+  <section class="panel results-panel" id="resultsPanel" hidden>
+    <h2><span class="tag">03</span> Output Folder</h2>
+    <p class="results-sub">Ready for USB transfer / offline field playback.</p>
+
+    <div class="stats-row" id="statsRow"></div>
+
+    <div class="downloads" id="downloads"></div>
+  </section>
+
+  <section class="panel archive-panel">
+    <h2><span class="tag">↻</span> Translation Memory — Recent Jobs</h2>
+    <div id="archiveTable" class="archive-table">
+      <p class="dim">No jobs archived yet.</p>
+    </div>
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
