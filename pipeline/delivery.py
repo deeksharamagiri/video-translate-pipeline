@@ -15,7 +15,8 @@ from pipeline.stage3_segment_tm import Segment
 def _run(cmd):
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode != 0:
-        raise RuntimeError(f"Command failed ({' '.join(cmd)}):\n{proc.stderr.decode(errors='ignore')}")
+        raise RuntimeError(
+            f"Command failed ({' '.join(cmd)}):\n{proc.stderr.decode(errors='ignore')}")
     return proc.stdout
 
 
@@ -69,7 +70,8 @@ def _ensure_piper_voice(voice_file: str) -> str:
                 f"Add one to config.PIPER_VOICE_URLS or place the file manually "
                 f"in {PIPER_VOICES_DIR}."
             )
-        print(f"[delivery] Downloading Piper voice file '{fname}' (first use only)...")
+        print(
+            f"[delivery] Downloading Piper voice file '{fname}' (first use only)...")
         import urllib.request
         urllib.request.urlretrieve(url, fpath)
         print(f"[delivery]   -> saved to {fpath}")
@@ -82,8 +84,8 @@ def _synthesize_segment_wav(text: str, lang: str, out_wav_path: str):
     voice_file = PIPER_VOICE_MAP.get(lang)
     if voice_file is None:
         raise RuntimeError(f"No Piper voice configured for language '{lang}'. "
-                            f"Add one in config.PIPER_VOICE_MAP (and a download URL in "
-                            f"config.PIPER_VOICE_URLS, or place the .onnx file manually).")
+                           f"Add one in config.PIPER_VOICE_MAP (and a download URL in "
+                           f"config.PIPER_VOICE_URLS, or place the .onnx file manually).")
     voice_path = _ensure_piper_voice(voice_file)
 
     proc = subprocess.run(
@@ -92,13 +94,33 @@ def _synthesize_segment_wav(text: str, lang: str, out_wav_path: str):
         stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"Piper TTS failed: {proc.stderr.decode(errors='ignore')}")
+        raise RuntimeError(
+            f"Piper TTS failed: {proc.stderr.decode(errors='ignore')}")
     return out_wav_path
 
 
 def _get_wav_duration(wav_path: str) -> float:
     with wave.open(wav_path, "rb") as w:
         return w.getnframes() / float(w.getframerate())
+
+
+def _get_sequential_timeline(segment_starts: List[float], segment_durations: List[float], min_gap_sec: float = 0.05) -> List[float]:
+    """Return start times that preserve natural gaps but prevent one clip from overlapping the next."""
+    if not segment_starts:
+        return []
+
+    adjusted_starts = []
+    cursor_end = 0.0
+    for index, (start, duration) in enumerate(zip(segment_starts, segment_durations)):
+        if duration <= 0:
+            duration = 0.01
+        if index == 0:
+            desired_start = start
+        else:
+            desired_start = max(start, cursor_end + min_gap_sec)
+        adjusted_starts.append(desired_start)
+        cursor_end = desired_start + duration
+    return adjusted_starts
 
 
 def build_voiceover_track(segments: List[Segment], target_lang: str, work_dir: str) -> str:
@@ -117,18 +139,22 @@ def build_voiceover_track(segments: List[Segment], target_lang: str, work_dir: s
             continue
         seg_wav = os.path.join(tts_dir, f"seg_{seg.index:05d}.wav")
         _synthesize_segment_wav(text, target_lang, seg_wav)
-        segment_wavs.append((seg.start, seg_wav))
+        segment_wavs.append((seg.start, seg_wav, _get_wav_duration(seg_wav)))
 
     if not segment_wavs:
         raise RuntimeError("No segments produced TTS audio.")
+
+    starts = [item[0] for item in segment_wavs]
+    durations = [item[2] for item in segment_wavs]
+    adjusted_starts = _get_sequential_timeline(starts, durations)
 
     # Build an ffmpeg filter_complex that delays each clip to its start time and mixes.
     inputs = []
     filter_parts = []
     mix_labels = []
-    for i, (start, wav_path) in enumerate(segment_wavs):
+    for i, (original_start, wav_path, _) in enumerate(segment_wavs):
         inputs += ["-i", wav_path]
-        delay_ms = max(0, int(start * 1000))
+        delay_ms = max(0, int(adjusted_starts[i] * 1000))
         filter_parts.append(f"[{i}:a]adelay={delay_ms}|{delay_ms}[a{i}]")
         mix_labels.append(f"[a{i}]")
 
@@ -145,8 +171,8 @@ def build_voiceover_track(segments: List[Segment], target_lang: str, work_dir: s
 
 
 def mux_voiceover_onto_video(video_path: str, voiceover_wav: str, out_mp4_path: str,
-                              mix_original_audio: bool = False,
-                              original_audio_gain_db: float = -18.0) -> str:
+                             mix_original_audio: bool = False,
+                             original_audio_gain_db: float = -18.0) -> str:
     """
     Puts the translated voiceover onto the video.
 
