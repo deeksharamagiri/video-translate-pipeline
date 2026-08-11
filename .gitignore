@@ -1,0 +1,4 @@
+.venv
+jobs
+pipeline/__pycache__
+__pycache__
