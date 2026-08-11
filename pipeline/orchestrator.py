@@ -126,7 +126,7 @@ def run_job(input_path: str, source_lang_hint: Optional[str], target_lang: str,
     voiceover_source_for_burn = None
 
     if input_kind == "video" and want_voiceover:
-        _progress(progress_cb, "voiceover", "Synthesising voiceover (Piper TTS)...", 92)
+        _progress(progress_cb, "voiceover", "Synthesising voiceover (Indic Parler-TTS)...", 92)
         voiceover_wav = delivery.build_voiceover_track(segments, target_lang, work_dir)
         voiceover_path = os.path.join(out_dir, f"{job_id}_voiceover.mp4")
         delivery.mux_voiceover_onto_video(local_input, voiceover_wav, voiceover_path)
