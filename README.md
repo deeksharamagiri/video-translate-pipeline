@@ -9,7 +9,7 @@
 | IndicTrans2 / NLLB-200 routing | `pipeline/translate.py` |
 | Stage 4 — Subtitle Generation | `pipeline/stage4_subtitle.py` |
 | SRT + VTT + Job Report (DOCX) | `pipeline/report.py` |
-| Burned-in MP4 / Voiceover MP4 (Piper + FFmpeg) | `pipeline/delivery.py` |
+| Burned-in MP4 / Voiceover MP4 (Indic Parler-TTS + FFmpeg) | `pipeline/delivery.py` |
 | Stage 5 — Archive & Reuse | `pipeline/stage5_archive.py` |
 | Output folder → USB / offline playback | `jobs/<job_id>/output/` |
 | Everything wired together | `pipeline/orchestrator.py` |
@@ -34,8 +34,9 @@ downloads. Everything else happens automatically the first time it's needed:
   run the app). No `apt install` / `brew install` required.
 - **faster-whisper, NLLB-200-distilled-600M** — downloaded automatically the
   first time a job actually needs ASR or non-Indic translation.
-- **Piper TTS voices** — downloaded automatically the first time you request
-  a voiceover MP4 for a given language.
+- **Indic Parler-TTS** — downloaded automatically the first time you request
+  a voiceover MP4 (one model covers nearly all 22 `INDIC_LANGS`, so there's
+  no per-language voice file to fetch).
 - **IndicTrans2** — downloaded automatically the first time a job needs an
   Indic↔Indic translation (e.g. Hindi→Marathi) — **with one caveat below.**
 
@@ -93,12 +94,15 @@ stack trace).
 5. **Low-SNR audio**: try a noisy/quiet recording — the Job Report should
    show a denoise warning.
 
-## Adding more Piper voices / languages
+## Adding more voiceover languages / voices
 
-Add a language code → filename in `config.PIPER_VOICE_MAP`, and the matching
-download URLs (`.onnx` + `.onnx.json`) in `config.PIPER_VOICE_URLS` (browse
-available voices at https://huggingface.co/rhasspy/piper-voices). It'll
-auto-download the first time that language is used for a voiceover.
+Indic Parler-TTS is a single model that auto-detects language from the
+segment text, so there's no per-language voice file to add. To set (or
+change) the voice used for a language, add or edit its entry in
+`config.INDIC_PARLER_VOICE_DESCRIPTIONS` — the value is a natural-language
+description of the speaker (name, tone, pace) rather than a filename. See
+the "Recommended Speakers" table on the model card for names known to work
+well: https://huggingface.co/ai4bharat/indic-parler-tts#-using-a-specific-speaker
 
 ## Adding glossary terms
 
