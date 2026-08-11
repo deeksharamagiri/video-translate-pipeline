@@ -18,10 +18,24 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 # No system install / shell script required: the first time this runs, it
 # downloads the right binaries for your OS and puts them on PATH. Every run
 # after that is instant (binaries are cached under this package's data dir).
+#
+# FFMPEG_BIN / FFPROBE_BIN hold the *exact* path to that downloaded binary,
+# and every subprocess call in the pipeline uses these rather than the bare
+# "ffmpeg"/"ffprobe" command names. That matters because add_paths() only
+# *prepends* to PATH — if the system already has an ffmpeg earlier on PATH
+# (e.g. a Homebrew build compiled without libass), plain "ffmpeg" can still
+# resolve to that one instead, and it'll be missing filters/codecs this
+# pipeline needs (the "subtitles" burn-in filter requires libass, which not
+# every ffmpeg build includes). Calling the resolved path directly guarantees
+# the full-featured static build is what actually runs, regardless of PATH.
 # ---------------------------------------------------------------------------
+FFMPEG_BIN = "ffmpeg"
+FFPROBE_BIN = "ffprobe"
 try:
     import static_ffmpeg
+    from static_ffmpeg import run as _static_ffmpeg_run
     static_ffmpeg.add_paths()
+    FFMPEG_BIN, FFPROBE_BIN = _static_ffmpeg_run.get_or_fetch_platform_executables_else_raise()
 except Exception as _e:  # pragma: no cover - defensive; real ffmpeg on PATH still works
     print(f"[config] static-ffmpeg auto-provisioning skipped/failed ({_e}). "
           f"Falling back to any ffmpeg/ffprobe already on PATH.")
@@ -73,59 +87,62 @@ MAX_LINES_PER_SUBTITLE = 2
 MIN_GAP_BETWEEN_SUBTITLES_SEC = 0.08
 
 # ---------- Delivery: Burned-in / Voiceover (user opt-in) ----------
-PIPER_VOICES_DIR = os.path.join(MODELS_DIR, "piper_voices")
+# Indic Parler-TTS (ai4bharat/indic-parler-tts) replaces Piper here. Piper
+# only ever had real published voices for a handful of Indic languages —
+# most of the 22 in INDIC_LANGS had NO offline Piper voice at all, so
+# voiceover silently degraded to "unavailable" for most languages. Indic
+# Parler-TTS is a single Hugging Face model that officially covers 20 Indic
+# languages + English (plus unofficial support for a few more, e.g. Punjabi,
+# Kashmiri), so one model now serves nearly every language in INDIC_LANGS
+# instead of a handful of separately-downloaded per-language voice files.
+INDIC_PARLER_TTS_MODEL = "ai4bharat/indic-parler-tts"
+INDIC_PARLER_TTS_DEVICE = "cpu"           # "cuda" if you have a GPU
 
-# IMPORTANT: Piper only has real published voices for a handful of Indic
-# languages — most of the 22 in INDIC_LANGS have NO offline Piper voice at
-# all. This map only lists languages that were verified against Piper's
-# actual voice catalog (https://huggingface.co/rhasspy/piper-voices/tree/main)
-# as of this writing. Previously "mar" (Marathi) pointed at a URL that
-# doesn't exist in that catalog — it would 404 at runtime and crash the
-# whole job. Removed rather than left broken.
-#
-# Languages WITHOUT a Piper voice (voiceover unavailable, subtitles/burned-in
-# still work fine): tam, kan, ben, guj, pan, ori, asm, san, kok, mai, mni,
-# snd, doi, brx, sat, kas, mar. If you need voiceover for one of these,
-# you'll need a different offline TTS engine (e.g. Coqui TTS, or AI4Bharat's
-# Indic Parler-TTS which covers ~20 Indic languages) — Piper just doesn't
-# have the voice.
-PIPER_VOICE_MAP = {
-    "hin": "hi_IN-pratham-medium.onnx",
-    "eng": "en_US-lessac-medium.onnx",
-    "mal": "ml_IN-arjun-medium.onnx",
-    "nep": "ne_NP-chitwan-medium.onnx",
-    "tel": "te_IN-maya-medium.onnx",
-    "urd": "ur_PK-fasih-medium.onnx",
-}
-# Where to fetch each voice from if it's not already present locally.
-# Source: https://huggingface.co/rhasspy/piper-voices (verify a language's
-# folder exists there before adding a new entry — a guessed URL that 404s
-# is exactly the bug this map previously had).
-PIPER_VOICE_URLS = {
-    "hi_IN-pratham-medium.onnx":
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/hi/hi_IN/pratham/medium/hi_IN-pratham-medium.onnx",
-    "hi_IN-pratham-medium.onnx.json":
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/hi/hi_IN/pratham/medium/hi_IN-pratham-medium.onnx.json",
-    "en_US-lessac-medium.onnx":
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
-    "en_US-lessac-medium.onnx.json":
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json",
-    "ml_IN-arjun-medium.onnx":
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/ml/ml_IN/arjun/medium/ml_IN-arjun-medium.onnx",
-    "ml_IN-arjun-medium.onnx.json":
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/ml/ml_IN/arjun/medium/ml_IN-arjun-medium.onnx.json",
-    "ne_NP-chitwan-medium.onnx":
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/ne/ne_NP/chitwan/medium/ne_NP-chitwan-medium.onnx",
-    "ne_NP-chitwan-medium.onnx.json":
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/ne/ne_NP/chitwan/medium/ne_NP-chitwan-medium.onnx.json",
-    "te_IN-maya-medium.onnx":
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/te/te_IN/maya/medium/te_IN-maya-medium.onnx",
-    "te_IN-maya-medium.onnx.json":
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/te/te_IN/maya/medium/te_IN-maya-medium.onnx.json",
-    "ur_PK-fasih-medium.onnx":
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/ur/ur_PK/fasih/medium/ur_PK-fasih-medium.onnx",
-    "ur_PK-fasih-medium.onnx.json":
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/ur/ur_PK/fasih/medium/ur_PK-fasih-medium.onnx.json",
+# Indic Parler-TTS doesn't take a language code — it's steered per segment by
+# a natural-language "voice description" caption fed in alongside the text,
+# and it auto-detects the language from the segment text/script itself. The
+# speaker names below are the per-language "Recommended Speakers" from the
+# model card's voice table
+# (https://huggingface.co/ai4bharat/indic-parler-tts#-using-a-specific-speaker),
+# which keeps the same voice consistent across every segment/job for a given
+# language. A handful of languages (kas, kok, mai, sat, snd, urd) have no
+# named recommended speaker on the model card — those fall back to a generic
+# high-quality-voice description; the model still auto-detects the language
+# and picks an appropriate voice, it's just not locked to one named speaker.
+def _voice(speaker: str) -> str:
+    return (f"{speaker}'s voice is clear and natural, delivered at a "
+            f"moderate pace and pitch. The recording is of very high "
+            f"quality, with no background noise.")
+
+
+_GENERIC_VOICE = ("A clear, natural voice speaks at a moderate pace and "
+                   "pitch. The recording is of very high quality, with no "
+                   "background noise.")
+
+INDIC_PARLER_VOICE_DESCRIPTIONS = {
+    "asm": _voice("Amit"),
+    "ben": _voice("Arjun"),
+    "brx": _voice("Bikram"),
+    "doi": _voice("Karan"),
+    "guj": _voice("Yash"),
+    "hin": _voice("Rohit"),
+    "kan": _voice("Suresh"),
+    "kas": _GENERIC_VOICE,   # unofficial support, no named recommended speaker
+    "kok": _GENERIC_VOICE,   # unofficial support, no named recommended speaker
+    "mai": _GENERIC_VOICE,   # unofficial support, no named recommended speaker
+    "mal": _voice("Anjali"),
+    "mni": _voice("Laishram"),
+    "mar": _voice("Sanjay"),
+    "nep": _voice("Amrita"),
+    "ori": _voice("Manas"),
+    "pan": _voice("Divjot"),  # unofficial support, but has a named speaker
+    "san": _voice("Aryan"),
+    "sat": _GENERIC_VOICE,   # unofficial support, no named recommended speaker
+    "snd": _GENERIC_VOICE,   # unofficial support, no named recommended speaker
+    "tam": _voice("Jaya"),
+    "tel": _voice("Prakash"),
+    "urd": _GENERIC_VOICE,   # unofficial support, no named recommended speaker
+    "eng": _voice("Thoma"),
 }
 
 # ---------- Stage 5 — Archive & Reuse ----------
