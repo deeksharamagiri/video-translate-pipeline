@@ -1,0 +1,37 @@
+# Core web app
+Flask==3.0.3
+Werkzeug==3.0.3
+python-docx
+
+# ML
+torch==2.5.1
+transformers==4.46.1
+faster-whisper==1.0.3
+sentencepiece==0.2.0
+
+# Indic translation
+IndicTransToolkit==1.1.1
+indic-nlp-library==0.92
+sacremoses==0.1.1
+
+# Parler-TTS
+parler-tts==0.2.2
+descript-audiotools==0.7.2
+descript-audio-codec==1.0.0
+dacite
+flatten-dict
+julius
+ffmpy
+importlib-resources
+
+# Audio
+soundfile
+scipy==1.13.1
+numpy==1.26.4
+librosa
+pyloudnorm
+pystoi
+
+# Utilities
+static-ffmpeg==2.5
+ffmpeg-python==0.2.0
