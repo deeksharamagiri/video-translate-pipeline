@@ -6,7 +6,6 @@ Routes:
   POST /api/upload            -> accept file + params, start background job, return job_id
   GET  /api/status/<job_id>   -> poll progress
   GET  /api/download/<job_id>/<kind> -> download an output file
-  GET  /api/archive           -> reuse dashboard data
 """
 import os
 import threading
@@ -18,10 +17,9 @@ from werkzeug.utils import secure_filename
 
 from config import (
     HOST, PORT, ALLOWED_VIDEO_EXT, ALLOWED_AUDIO_EXT,
-    MAX_VIDEO_SIZE_MB, MAX_AUDIO_SIZE_MB, JOBS_DIR
+    MAX_VIDEO_SIZE_MB, MAX_AUDIO_SIZE_MB
 )
 from pipeline.orchestrator import run_job, JobError
-from pipeline.stage5_archive import get_archive_stats
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = max(MAX_VIDEO_SIZE_MB, MAX_AUDIO_SIZE_MB) * 1024 * 1024
@@ -94,6 +92,7 @@ def upload():
                 saved_path, source_lang_hint, target_lang,
                 want_burned_in, want_voiceover, progress_cb=_progress_cb,
                 engine_override=engine_override,
+                job_id=job_id,
             )
             with JOBS_LOCK:
                 JOBS[job_id]["result"] = result
@@ -157,11 +156,6 @@ def download(job_id, kind):
     return send_file(path, as_attachment=True)
 
 
-@app.route("/api/archive")
-def archive():
-    return jsonify({"jobs": get_archive_stats()})
-
-
 if __name__ == "__main__":
     print("=" * 70)
     print("Offline Field Translator")
@@ -172,13 +166,15 @@ if __name__ == "__main__":
     print("job after that runs fully offline.")
     if not os.environ.get("HF_TOKEN"):
         print()
-        print("NOTE: IndicTrans2 (used for Indic<->Indic translation, e.g. Hindi<->")
-        print("Marathi) is a free but 'gated' model on Hugging Face. If a job using")
-        print("it fails, accept the terms once while logged in at:")
+        print("NOTE: IndicTrans2 (all three checkpoints — indic-indic, en-indic,")
+        print("indic-en) and Krutrim-Translate (English<->Hindi/Bengali/Kannada/")
+        print("Marathi/Malayalam/Gujarati/Punjabi/Telugu/Tamil) are free but 'gated'")
+        print("models on Hugging Face. Accept the terms once while logged in at:")
         print("  https://huggingface.co/ai4bharat/indictrans2-indic-indic-1B")
         print("  https://huggingface.co/ai4bharat/indictrans2-en-indic-1B")
         print("  https://huggingface.co/ai4bharat/indictrans2-indic-en-1B")
+        print("  https://huggingface.co/krutrim-ai-labs/Krutrim-Translate")
         print("then set:  export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx   and restart.")
-        print("Translations into/from English via NLLB-200 don't need this.")
+        print("Voiceover (MMS-TTS) isn't gated and doesn't need this.")
     print("=" * 70)
     app.run(host=HOST, port=PORT, debug=False, threaded=True)

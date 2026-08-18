@@ -4,10 +4,51 @@ Every limit / model name here maps 1:1 to a box in the architecture slide.
 """
 import os
 
+# Every TTS/translation model here loads a `tokenizers`-backed HF tokenizer,
+# and the pipeline also shells out to ffmpeg via subprocess (which forks).
+# Forking after tokenizers' internal thread pool has started makes it print
+# a "process just got forked" warning and disable itself defensively — set
+# this before anything imports transformers/tokenizers so it never spins
+# the pool up in the first place. setdefault() so an explicit env var
+# (e.g. in a shell profile) still wins.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 JOBS_DIR = os.path.join(BASE_DIR, "jobs")
 MODELS_DIR = os.path.join(BASE_DIR, "models")
+
+
+def resolve_torch_device(requested_device: str) -> str:
+    """
+    Shared CUDA/MPS/CPU fallback for every `transformers`/torch-based model
+    loader (translate.py's IndicTrans2 checkpoints, delivery.py's MMS-TTS).
+    Falls back to CPU with a printed note if the requested accelerator
+    isn't actually available.
+
+    NOT used by WHISPER_DEVICE below — that runs on CTranslate2, which only
+    supports "cpu"/"cuda", no Apple Silicon MPS backend — so it stays
+    CPU-only regardless of what hardware is present. Imports torch lazily
+    so importing config.py (done by every module at startup, including
+    plain Flask routes) doesn't pay torch's import cost up front.
+    """
+    import torch
+
+    requested_device = str(requested_device).strip().lower()
+
+    if requested_device.startswith("cuda"):
+        if torch.cuda.is_available():
+            return requested_device
+        print("[config] CUDA was requested, but CUDA is unavailable. Using CPU.")
+        return "cpu"
+
+    if requested_device in {"mps", "mps:0"}:
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+        print("[config] MPS was requested, but MPS is unavailable. Using CPU.")
+        return "cpu"
+
+    return "cpu"
 
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(JOBS_DIR, exist_ok=True)
@@ -55,31 +96,84 @@ SNR_DENOISE_THRESHOLD_DB = 15.0           # below this -> auto-denoise + warn us
 
 # ---------- Stage 2 — ASR (faster-whisper) ----------
 WHISPER_MODEL_SIZE = "small"              # tiny/base/small/medium/large-v3 — swap as needed
-WHISPER_DEVICE = "cpu"                    # "cuda" if you have a GPU
+# CTranslate2-backed (faster-whisper's engine) — only supports "cpu"/"cuda",
+# no Apple Silicon MPS backend, so this stays "cpu" even on a Mac with a GPU.
+WHISPER_DEVICE = "cpu"                    # "cuda" if you have an NVIDIA GPU
 WHISPER_COMPUTE_TYPE = "int8"             # int8 for CPU, float16 for GPU
 
 # ---------- Stage 3 — Segmentation + Translation Memory ----------
 TM_DB_PATH = os.path.join(DATA_DIR, "translation_memory.db")
 SEGMENT_MAX_CHARS = 200                   # chunking granularity before hashing
 
+# When translating a sentence, prepend the immediately preceding sentence as
+# extra (discarded-after) context — helps cross-sentence agreement (e.g.
+# pronoun gender: a lone "She yells." can come back with a masculine verb,
+# since a single isolated sentence gives the model little to anchor on)
+# that dedicated NMT models routinely get wrong on short sentences. Costs
+# roughly 2x the input tokens per translated sentence; set False to disable.
+TRANSLATE_WITH_CONTEXT = True
+
 # ---------- Translation engines ----------
+# BOTH SIDES ARE INDIC LANGUAGES -> IndicTrans2 indic-indic-1B
+# ONE SIDE IS ENGLISH            -> Krutrim-Translate
+#
+# Krutrim-Translate is a distilled IndicTrans2 derivative built specifically
+# for fast CPU English<->Indic inference. It replaced IndicTrans2's own
+# en-indic-1B/indic-en-1B checkpoints as the "auto" default after a real
+# CPU benchmark: 22 sentences took 476.8s (21.7s/sentence) through the full
+# 1B-param en-indic-1B checkpoint with beam=5, vs. 4.2s (0.19s/sentence)
+# through Krutrim for the exact same sentences — ~114x faster, and it's the
+# reason Krutrim was distilled from IndicTrans2 in the first place. The
+# en-indic-1B/indic-en-1B checkpoints are still available via the
+# "indictrans2-en" forced engine for A/B comparison.
 INDIC_LANGS = {
     "asm", "ben", "brx", "doi", "guj", "hin", "kan", "kas", "kok", "mai",
     "mal", "mni", "mar", "nep", "ori", "pan", "san", "sat", "snd", "tam",
     "tel", "urd"  # 22 official Indian languages, per the diagram exactly.
     # NOTE: "eng" was previously included here as an "English pivot" — that
     # made English source/target count as an Indic language, so English->
-    # Hindi was routing to IndicTrans2 instead of NLLB as the diagram
-    # specifies ("BOTH Indian languages" -> IndicTrans2, anything else ->
-    # NLLB). Worse, the IndicTrans2 call always used the indic-indic
-    # checkpoint regardless, which isn't trained for English source — that's
-    # very likely why English->Hindi output looked off. Removed.
+    # Hindi was routing to the indic-indic checkpoint instead of the
+    # English<->Indic model — which isn't trained for English source —
+    # that's very likely why English->Hindi output looked off. Removed.
 }
-ENGINE_CHOICES = {"auto", "indictrans2", "nllb"}  # "auto" = diagram's routing logic
+ENGINE_CHOICES = {"auto", "indictrans2", "indictrans2-en", "krutrim"}
 
 INDICTRANS2_MODEL = "ai4bharat/indictrans2-indic-indic-1B"
-NLLB_MODEL = "facebook/nllb-200-distilled-600M"
+# Dedicated English<->Indic checkpoints (full-size, non-distilled — the
+# model Krutrim-Translate was distilled from). Gated on HF like
+# INDICTRANS2_MODEL; not used by "auto" routing (Krutrim-Translate is the
+# default for English<->Indic — see above) but available via the
+# "indictrans2-en" forced engine for A/B comparison.
+INDICTRANS2_EN_INDIC_MODEL = "ai4bharat/indictrans2-en-indic-1B"
+INDICTRANS2_INDIC_EN_MODEL = "ai4bharat/indictrans2-indic-en-1B"
 GLOSSARY_PATH = os.path.join(DATA_DIR, "glossary.json")
+
+# Krutrim-Translate (krutrim-ai-labs) — English<->Indic only, 9 languages.
+# Gated on HF like IndicTrans2 (same HF_TOKEN / "accept terms" flow — see
+# README.md). Ships as CTranslate2-exported weights (two directional
+# checkpoints, no transformers/AutoModel format), so it's loaded via the
+# vendored pipeline/krutrim_engine wrapper (the model's own reference
+# inference code) rather than `transformers`.
+KRUTRIM_TRANSLATE_REPO = "krutrim-ai-labs/Krutrim-Translate"
+KRUTRIM_TRANSLATE_DIR = os.path.join(MODELS_DIR, "krutrim-translate")
+# CTranslate2-backed — only supports "cpu"/"cuda", no Apple Silicon MPS
+# backend, so this stays "cpu" even on a Mac with a GPU (same limitation as
+# WHISPER_DEVICE). This is also the fast path, so it being CPU-only is not
+# a practical concern the way it was for the 1B-param transformers models.
+KRUTRIM_TRANSLATE_DEVICE = "cpu"          # "cuda" if you have an NVIDIA GPU
+KRUTRIM_INDIC_LANGS = {"hin", "ben", "kan", "mar", "mal", "guj", "pan", "tel", "tam"}
+
+# IndicTrans2 checkpoints are plain `transformers` models and CAN use MPS
+# (measured faster in isolation on an M1). Set to "cpu" here on purpose:
+# the demo machine has no GPU, and even on this M1, MPS ran out of its
+# shared memory pool once both IndicTrans2 1B checkpoints + MMS-TTS were
+# resident at once ("MPS backend out of memory... 9.04 GiB allocated...
+# max allowed 9.07 GiB" — MPS shares the same 8GB unified memory as
+# everything else, it isn't separate VRAM). Testing CPU-only here matches
+# the real demo environment exactly. With Krutrim now handling the common
+# English<->Indic path, this setting mostly only affects the (less
+# frequently used, and not yet re-benchmarked) indic-indic-1B checkpoint.
+TRANSLATION_DEVICE = "cpu"                # "mps" for Apple Silicon GPU, "cuda" if you have an NVIDIA GPU
 
 # ---------- Stage 4 — Subtitle Generation ----------
 MAX_CHARS_PER_LINE = 42
@@ -87,63 +181,22 @@ MAX_LINES_PER_SUBTITLE = 2
 MIN_GAP_BETWEEN_SUBTITLES_SEC = 0.08
 
 # ---------- Delivery: Burned-in / Voiceover (user opt-in) ----------
-# Indic Parler-TTS (ai4bharat/indic-parler-tts) replaces Piper here. Piper
-# only ever had real published voices for a handful of Indic languages —
-# most of the 22 in INDIC_LANGS had NO offline Piper voice at all, so
-# voiceover silently degraded to "unavailable" for most languages. Indic
-# Parler-TTS is a single Hugging Face model that officially covers 20 Indic
-# languages + English (plus unofficial support for a few more, e.g. Punjabi,
-# Kashmiri), so one model now serves nearly every language in INDIC_LANGS
-# instead of a handful of separately-downloaded per-language voice files.
-INDIC_PARLER_TTS_MODEL = "ai4bharat/indic-parler-tts"
-INDIC_PARLER_TTS_DEVICE = "cpu"           # "cuda" if you have a GPU
-
-# Indic Parler-TTS doesn't take a language code — it's steered per segment by
-# a natural-language "voice description" caption fed in alongside the text,
-# and it auto-detects the language from the segment text/script itself. The
-# speaker names below are the per-language "Recommended Speakers" from the
-# model card's voice table
-# (https://huggingface.co/ai4bharat/indic-parler-tts#-using-a-specific-speaker),
-# which keeps the same voice consistent across every segment/job for a given
-# language. A handful of languages (kas, kok, mai, sat, snd, urd) have no
-# named recommended speaker on the model card — those fall back to a generic
-# high-quality-voice description; the model still auto-detects the language
-# and picks an appropriate voice, it's just not locked to one named speaker.
-def _voice(speaker: str) -> str:
-    return (f"{speaker}'s voice is clear and natural, delivered at a "
-            f"moderate pace and pitch. The recording is of very high "
-            f"quality, with no background noise.")
-
-
-_GENERIC_VOICE = ("A clear, natural voice speaks at a moderate pace and "
-                   "pitch. The recording is of very high quality, with no "
-                   "background noise.")
-
-INDIC_PARLER_VOICE_DESCRIPTIONS = {
-    "asm": _voice("Amit"),
-    "ben": _voice("Arjun"),
-    "brx": _voice("Bikram"),
-    "doi": _voice("Karan"),
-    "guj": _voice("Yash"),
-    "hin": _voice("Rohit"),
-    "kan": _voice("Suresh"),
-    "kas": _GENERIC_VOICE,   # unofficial support, no named recommended speaker
-    "kok": _GENERIC_VOICE,   # unofficial support, no named recommended speaker
-    "mai": _GENERIC_VOICE,   # unofficial support, no named recommended speaker
-    "mal": _voice("Anjali"),
-    "mni": _voice("Laishram"),
-    "mar": _voice("Sanjay"),
-    "nep": _voice("Amrita"),
-    "ori": _voice("Manas"),
-    "pan": _voice("Divjot"),  # unofficial support, but has a named speaker
-    "san": _voice("Aryan"),
-    "sat": _GENERIC_VOICE,   # unofficial support, no named recommended speaker
-    "snd": _GENERIC_VOICE,   # unofficial support, no named recommended speaker
-    "tam": _voice("Jaya"),
-    "tel": _voice("Prakash"),
-    "urd": _GENERIC_VOICE,   # unofficial support, no named recommended speaker
-    "eng": _voice("Thoma"),
-}
+# facebook/mms-tts-<lang> (Meta Massively Multilingual Speech) — VITS
+# (non-autoregressive), ~36M params, ONE CHECKPOINT PER LANGUAGE. The sole
+# voiceover engine for the demo build (Indic Parler-TTS was dropped —
+# broader language coverage, but autoregressive and ~50s/segment even with
+# a GPU, vs. MMS-TTS's 341ms/segment on MPS / ~951ms on CPU-only). Not
+# gated — no HF_TOKEN/approval needed.
+#
+# Coverage was verified against the live HF Hub (not assumed) for every
+# INDIC_LANGS code — only these 10 repos actually exist under the
+# `facebook/mms-tts-<code>` naming as of this writing; the rest 404
+# (brx, doi, kas, kok, mni, nep, ori, san, sat, snd, urd all NOT FOUND).
+# If Meta publishes more later, add the code here to pick it up.
+# "cpu" to match the no-GPU demo machine exactly — see TRANSLATION_DEVICE
+# above for why MPS was disabled here too (shared unified-memory pressure).
+MMS_TTS_DEVICE = "cpu"                    # "mps" for Apple Silicon GPU, "cuda" if you have an NVIDIA GPU
+MMS_TTS_LANGS = {"asm", "ben", "guj", "hin", "mai", "mal", "mar", "pan", "tam", "tel"}
 
 # ---------- Stage 5 — Archive & Reuse ----------
 ARCHIVE_DB_PATH = os.path.join(DATA_DIR, "translation_memory.db")  # same DB, different tables

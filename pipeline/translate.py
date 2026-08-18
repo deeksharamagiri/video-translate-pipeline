@@ -1,30 +1,29 @@
 """
-Translation routing exactly as drawn on the diagram:
+Translation routing:
 
-    BOTH INDIAN LANGUAGES  -> IndicTrans2 (AI4Bharat)
-    ANY OTHER LANGUAGE PAIR -> NLLB-200-distilled-600M (Meta AI)
+    BOTH INDIAN LANGUAGES -> IndicTrans2 indic-indic-1B (AI4Bharat)
+    ONE SIDE IS ENGLISH   -> Krutrim-Translate (krutrim-ai-labs) — fast,
+                             distilled specifically for this; IndicTrans2's
+                             own en-indic-1B/indic-en-1B checkpoints are
+                             ~114x slower on CPU for the same sentences
+                             (measured), but stay available via the
+                             "indictrans2-en" forced engine for comparison.
 
-Both branches get glossary injection before/after the model call.
+All branches get glossary injection before/after the model call.
 """
 import json
 import os
 import re
 from typing import List
 
-from config import INDIC_LANGS, INDICTRANS2_MODEL, NLLB_MODEL, GLOSSARY_PATH
+from config import (
+    INDIC_LANGS, INDICTRANS2_MODEL, INDICTRANS2_EN_INDIC_MODEL, INDICTRANS2_INDIC_EN_MODEL,
+    GLOSSARY_PATH, TRANSLATION_DEVICE, resolve_torch_device,
+    KRUTRIM_TRANSLATE_REPO, KRUTRIM_TRANSLATE_DIR, KRUTRIM_TRANSLATE_DEVICE,
+)
 
 _indictrans_cache = {}
-_nllb_cache = {}
-
-# NLLB uses FLORES-200 codes; map our internal ISO-639-3-ish codes to them.
-NLLB_LANG_CODE_MAP = {
-    "eng": "eng_Latn", "hin": "hin_Deva", "mar": "mar_Deva", "ben": "ben_Beng",
-    "tam": "tam_Taml", "tel": "tel_Telu", "kan": "kan_Knda", "mal": "mal_Mlym",
-    "guj": "guj_Gujr", "pan": "pan_Guru", "urd": "urd_Arab", "ori": "ory_Orya",
-    "asm": "asm_Beng", "nep": "npi_Deva", "san": "san_Deva",
-    "fra": "fra_Latn", "spa": "spa_Latn", "deu": "deu_Latn", "zho": "zho_Hans",
-    "ara": "arb_Arab", "por": "por_Latn", "rus": "rus_Cyrl", "jpn": "jpn_Jpan",
-}
+_krutrim_cache = {}
 
 
 def load_glossary():
@@ -73,49 +72,46 @@ def _restore_glossary_terms(text: str, restore_map: dict) -> str:
 
 
 # ---------------------------------------------------------------- IndicTrans2
-def _get_indictrans_model():
-    if "model" not in _indictrans_cache:
-        import torch
-        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-        from IndicTransToolkit.processor import IndicProcessor
+# All three IndicTrans2 checkpoints (indic-indic, en-indic, indic-en) share
+# the same transformers + IndicProcessor loading/generation shape, so that
+# part is factored out; each direction just gets its own cached checkpoint.
+def _load_indictrans_checkpoint(model_name: str) -> dict:
+    import torch
+    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+    from IndicTransToolkit.processor import IndicProcessor
 
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(INDICTRANS2_MODEL, trust_remote_code=True)
-            model = AutoModelForSeq2SeqLM.from_pretrained(
-                INDICTRANS2_MODEL, trust_remote_code=True
-            )
-        except Exception as e:
-            raise RuntimeError(
-                "Could not load IndicTrans2. This model is 'gated' on Hugging Face: "
-                "free to use, but you must (1) accept the terms once at "
-                f"https://huggingface.co/{INDICTRANS2_MODEL} while logged in, and "
-                "(2) run 'huggingface-cli login' locally (or set HF_TOKEN) before "
-                f"first use. See README.md for exact steps. Original error: {e}"
-            ) from e
-        model.eval()
-        _indictrans_cache["tokenizer"] = tokenizer
-        _indictrans_cache["model"] = model
-        _indictrans_cache["processor"] = IndicProcessor(inference=True)
-        _indictrans_cache["torch"] = torch
-    return (_indictrans_cache["model"], _indictrans_cache["tokenizer"],
-            _indictrans_cache["processor"], _indictrans_cache["torch"])
-
-
-_INDIC_FLORES_MAP = {
-    "hin": "hin_Deva", "mar": "mar_Deva", "ben": "ben_Beng", "tam": "tam_Taml",
-    "tel": "tel_Telu", "kan": "kan_Knda", "mal": "mal_Mlym", "guj": "guj_Gujr",
-    "pan": "pan_Guru", "urd": "urd_Arab", "ori": "ory_Orya", "asm": "asm_Beng",
-    "nep": "npi_Deva", "san": "san_Deva", "eng": "eng_Latn",
-}
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, trust_remote_code=True)
+    except Exception as e:
+        raise RuntimeError(
+            f"Could not load {model_name}. This model is 'gated' on Hugging Face: "
+            "free to use, but you must (1) accept the terms once at "
+            f"https://huggingface.co/{model_name} while logged in, and "
+            "(2) run 'huggingface-cli login' locally (or set HF_TOKEN) before "
+            f"first use. See README.md for exact steps. Original error: {e}"
+        ) from e
+    device = resolve_torch_device(TRANSLATION_DEVICE)
+    model = model.to(device)
+    model.eval()
+    return {
+        "model": model, "tokenizer": tokenizer, "device": device,
+        "processor": IndicProcessor(inference=True), "torch": torch,
+    }
 
 
-def translate_with_indictrans2(texts: List[str], source_lang: str, target_lang: str) -> List[str]:
-    model, tokenizer, processor, torch = _get_indictrans_model()
-    src_code = _INDIC_FLORES_MAP.get(source_lang, "hin_Deva")
-    tgt_code = _INDIC_FLORES_MAP.get(target_lang, "eng_Latn")
+def _get_indictrans_checkpoint(cache_key: str, model_name: str) -> dict:
+    if cache_key not in _indictrans_cache:
+        _indictrans_cache[cache_key] = _load_indictrans_checkpoint(model_name)
+    return _indictrans_cache[cache_key]
+
+
+def _generate_indictrans(checkpoint: dict, texts: List[str], src_code: str, tgt_code: str) -> List[str]:
+    model, tokenizer = checkpoint["model"], checkpoint["tokenizer"]
+    processor, torch, device = checkpoint["processor"], checkpoint["torch"], checkpoint["device"]
 
     batch = processor.preprocess_batch(texts, src_lang=src_code, tgt_lang=tgt_code)
-    inputs = tokenizer(batch, truncation=True, padding=True, return_tensors="pt")
+    inputs = tokenizer(batch, truncation=True, padding=True, return_tensors="pt").to(device)
 
     with torch.no_grad():
         generated = model.generate(
@@ -125,51 +121,86 @@ def translate_with_indictrans2(texts: List[str], source_lang: str, target_lang: 
     return processor.postprocess_batch(decoded, lang=tgt_code)
 
 
-# ---------------------------------------------------------------------- NLLB
-def _get_nllb_model():
-    if "model" not in _nllb_cache:
-        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(NLLB_MODEL)
-        model = AutoModelForSeq2SeqLM.from_pretrained(NLLB_MODEL)
-        model.eval()
-        _nllb_cache["tokenizer"] = tokenizer
-        _nllb_cache["model"] = model
-    return _nllb_cache["model"], _nllb_cache["tokenizer"]
+_INDIC_FLORES_MAP = {
+    "hin": "hin_Deva", "mar": "mar_Deva", "ben": "ben_Beng", "tam": "tam_Taml",
+    "tel": "tel_Telu", "kan": "kan_Knda", "mal": "mal_Mlym", "guj": "guj_Gujr",
+    "pan": "pan_Guru", "urd": "urd_Arab", "ori": "ory_Orya", "asm": "asm_Beng",
+    "nep": "npi_Deva", "san": "san_Deva", "mai": "mai_Deva", "eng": "eng_Latn",
+}
 
 
-def translate_with_nllb(texts: List[str], source_lang: str, target_lang: str) -> List[str]:
-    import torch
-    model, tokenizer = _get_nllb_model()
-    src_code = NLLB_LANG_CODE_MAP.get(source_lang, "eng_Latn")
-    tgt_code = NLLB_LANG_CODE_MAP.get(target_lang, "eng_Latn")
+def translate_with_indictrans2(texts: List[str], source_lang: str, target_lang: str) -> List[str]:
+    checkpoint = _get_indictrans_checkpoint("indic_indic", INDICTRANS2_MODEL)
+    src_code = _INDIC_FLORES_MAP.get(source_lang, "hin_Deva")
+    tgt_code = _INDIC_FLORES_MAP.get(target_lang, "eng_Latn")
+    return _generate_indictrans(checkpoint, texts, src_code, tgt_code)
 
-    tokenizer.src_lang = src_code
-    results = []
-    for text in texts:
-        inputs = tokenizer(text, return_tensors="pt", truncation=True)
-        forced_bos_token_id = tokenizer.convert_tokens_to_ids(tgt_code)
-        with torch.no_grad():
-            generated = model.generate(
-                **inputs, forced_bos_token_id=forced_bos_token_id,
-                max_length=256, num_beams=5
-            )
-        results.append(tokenizer.decode(generated[0], skip_special_tokens=True))
-    return results
+
+def translate_with_indictrans2_en(texts: List[str], source_lang: str, target_lang: str) -> List[str]:
+    """
+    Uses IndicTrans2's dedicated en-indic / indic-en 1B checkpoints — the
+    full-size (non-distilled) models Krutrim-Translate was distilled from,
+    for comparison on English<->Indic naturalness. Much slower on CPU than
+    Krutrim (measured ~114x) — not used by "auto" routing.
+    """
+    direction = "en_indic" if source_lang == "eng" else "indic_en"
+    model_name = INDICTRANS2_EN_INDIC_MODEL if direction == "en_indic" else INDICTRANS2_INDIC_EN_MODEL
+    checkpoint = _get_indictrans_checkpoint(direction, model_name)
+    src_code = _INDIC_FLORES_MAP.get(source_lang, "eng_Latn")
+    tgt_code = _INDIC_FLORES_MAP.get(target_lang, "eng_Latn")
+    return _generate_indictrans(checkpoint, texts, src_code, tgt_code)
+
+
+# --------------------------------------------------------------- Krutrim-Translate
+def _get_krutrim_model(direction: str):
+    """direction: 'en_indic' or 'indic_en' — Krutrim ships two directional checkpoints."""
+    if direction not in _krutrim_cache:
+        if not os.path.isdir(KRUTRIM_TRANSLATE_DIR):
+            try:
+                from huggingface_hub import snapshot_download
+                snapshot_download(repo_id=KRUTRIM_TRANSLATE_REPO, local_dir=KRUTRIM_TRANSLATE_DIR)
+            except Exception as e:
+                raise RuntimeError(
+                    "Could not download Krutrim-Translate. This model is 'gated' on "
+                    "Hugging Face: free to use, but you must (1) accept the terms once "
+                    f"at https://huggingface.co/{KRUTRIM_TRANSLATE_REPO} while logged in, "
+                    "and (2) set the HF_TOKEN environment variable before first use. "
+                    f"See README.md for exact steps. Original error: {e}"
+                ) from e
+
+        from pipeline.krutrim_engine.engine import Model as KrutrimModel
+        ckpt_subdir = "ct_model_english_indic" if direction == "en_indic" else "ct_model_indic_english"
+        ckpt_dir = os.path.join(KRUTRIM_TRANSLATE_DIR, ckpt_subdir)
+        _krutrim_cache[direction] = KrutrimModel(
+            ckpt_dir, device=KRUTRIM_TRANSLATE_DEVICE, input_lang_code_format="flores"
+        )
+    return _krutrim_cache[direction]
+
+
+def translate_with_krutrim(texts: List[str], source_lang: str, target_lang: str) -> List[str]:
+    direction = "en_indic" if source_lang == "eng" else "indic_en"
+    model = _get_krutrim_model(direction)
+    src_code = _INDIC_FLORES_MAP.get(source_lang, "eng_Latn")
+    tgt_code = _INDIC_FLORES_MAP.get(target_lang, "eng_Latn")
+    return model.batch_translate(texts, src_lang=src_code, tgt_lang=tgt_code, beam_len=5)
 
 
 # --------------------------------------------------------------- entry point
 def translate_batch(texts: List[str], source_lang: str, target_lang: str,
                      engine_override: str = "auto") -> tuple:
     """
-    Route to IndicTrans2 or NLLB-200 per the diagram, with glossary
-    protection wrapped around either engine.
+    Route to the indic-indic or en-indic/indic-en IndicTrans2 checkpoint,
+    with glossary protection wrapped around either.
 
     engine_override:
-      "auto"        -> diagram's routing logic (both Indic -> IndicTrans2, else NLLB)
-      "indictrans2" -> force IndicTrans2 regardless of language pair (useful for
-                       comparison; quality isn't guaranteed outside Indic<->Indic
-                       since only the indic-indic checkpoint is wired up below)
-      "nllb"        -> force NLLB-200-distilled-600M regardless of language pair
+      "auto"           -> both Indic -> indic-indic-1B, else (English side) -> Krutrim-Translate
+      "indictrans2"    -> force indic-indic-1B regardless of language pair (useful for
+                          comparison; quality isn't guaranteed outside Indic<->Indic)
+      "indictrans2-en" -> force IndicTrans2's en-indic-1B/indic-en-1B checkpoints (the
+                          full-size models Krutrim was distilled from) — much slower on
+                          CPU (~114x measured), useful only for A/B comparison
+      "krutrim"        -> force Krutrim-Translate regardless of language pair (only
+                          actually supports English<->one of the 9 KRUTRIM_INDIC_LANGS)
     """
     if not texts:
         return [], "n/a"
@@ -186,13 +217,17 @@ def translate_batch(texts: List[str], source_lang: str, target_lang: str,
         engine_override == "indictrans2"
         or (engine_override == "auto" and is_indic_pair(source_lang, target_lang))
     )
+    use_indictrans2_en = not use_indictrans2 and engine_override == "indictrans2-en"
 
     if use_indictrans2:
         engine_name = "IndicTrans2 (forced)" if engine_override == "indictrans2" else "IndicTrans2"
         raw_outputs = translate_with_indictrans2(protected_texts, source_lang, target_lang)
+    elif use_indictrans2_en:
+        engine_name = "IndicTrans2 en-indic-1B (forced)"
+        raw_outputs = translate_with_indictrans2_en(protected_texts, source_lang, target_lang)
     else:
-        engine_name = "NLLB-200-distilled-600M (forced)" if engine_override == "nllb" else "NLLB-200-distilled-600M"
-        raw_outputs = translate_with_nllb(protected_texts, source_lang, target_lang)
+        engine_name = "Krutrim-Translate (forced)" if engine_override == "krutrim" else "Krutrim-Translate"
+        raw_outputs = translate_with_krutrim(protected_texts, source_lang, target_lang)
 
     final_outputs = [
         _restore_glossary_terms(out, rmap)
@@ -204,6 +239,10 @@ def translate_batch(texts: List[str], source_lang: str, target_lang: str,
 def model_version_tag(source_lang: str, target_lang: str, engine_override: str = "auto") -> str:
     if engine_override == "indictrans2":
         return "indictrans2-1B-forced"
-    if engine_override == "nllb":
-        return "nllb-200-distilled-600M-forced"
-    return "indictrans2-1B" if is_indic_pair(source_lang, target_lang) else "nllb-200-distilled-600M"
+    if engine_override == "indictrans2-en":
+        return "indictrans2-en-indic-1B-forced"
+    if engine_override == "krutrim":
+        return "krutrim-translate-forced"
+    if is_indic_pair(source_lang, target_lang):
+        return "indictrans2-1B"
+    return "krutrim-translate"

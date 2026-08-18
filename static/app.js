@@ -16,26 +16,6 @@ const downloadsEl = document.getElementById('downloads');
 
 let selectedFile = null;
 
-// Maps backend progress "stage" values to the UI stage-track node ids.
-const STAGE_ORDER = ['stage1', 'asr', 'stage3', 'translate', 'stage4', 'stage5', 'done'];
-const STAGE_ALIASES = { skip_asr: 'asr', stage2: 'asr', burned_in: 'done', voiceover: 'done', queued: 'stage1' };
-
-function resolveStageId(rawStage) {
-  return STAGE_ALIASES[rawStage] || rawStage;
-}
-
-function highlightStage(rawStage) {
-  const resolved = resolveStageId(rawStage);
-  const idx = STAGE_ORDER.indexOf(resolved);
-  document.querySelectorAll('.stage').forEach(el => {
-    const stId = el.dataset.stage;
-    const stIdx = STAGE_ORDER.indexOf(stId);
-    el.classList.remove('active', 'complete');
-    if (stIdx < idx) el.classList.add('complete');
-    else if (stIdx === idx) el.classList.add('active');
-  });
-}
-
 dropzone.addEventListener('click', () => fileInput.click());
 dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
 dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
@@ -105,7 +85,6 @@ function pollStatus(jobId) {
       if (data.progress) {
         progressBarInner.style.width = `${data.progress.pct}%`;
         progressMsg.textContent = data.progress.message;
-        highlightStage(data.progress.stage);
       }
 
       if (data.error) {
@@ -122,7 +101,6 @@ function pollStatus(jobId) {
         renderResults(jobId, data.result);
         submitBtn.disabled = false;
         submitBtn.textContent = 'Run Pipeline';
-        loadArchive();
       }
     } catch (err) {
       clearInterval(interval);
@@ -139,17 +117,22 @@ const DOWNLOAD_META = {
   voiceover_mp4: { key: 'voiceover', name: 'Voiceover Video (.mp4)', desc: 'Dubbed audio track' },
 };
 
+const LANG_NAMES = {
+  hin: 'Hindi', eng: 'English', mar: 'Marathi', ben: 'Bengali', tam: 'Tamil',
+  tel: 'Telugu', kan: 'Kannada', mal: 'Malayalam', guj: 'Gujarati',
+  pan: 'Punjabi', urd: 'Urdu', asm: 'Assamese', mai: 'Maithili',
+};
+
 function renderResults(jobId, result) {
   resultsPanel.hidden = false;
   const s = result.stats;
+  const srcName = LANG_NAMES[s.source_lang] || s.source_lang;
+  const tgtName = LANG_NAMES[s.target_lang] || s.target_lang;
 
   statsRow.innerHTML = `
-    <div class="stat-chip">SRC <b>${s.source_lang}</b></div>
-    <div class="stat-chip">TGT <b>${s.target_lang}</b></div>
+    <div class="stat-chip">TRANSLATED <b>${srcName} → ${tgtName}</b></div>
     <div class="stat-chip">ENGINE <b>${s.engine}</b></div>
-    <div class="stat-chip">SEGMENTS <b>${s.segment_count}</b></div>
-    <div class="stat-chip">CACHE HITS <b>${s.cache_hit_count}</b></div>
-    <div class="stat-chip">DENOISE <b>${s.preprocess.denoise_applied ? 'YES' : 'no'}</b></div>
+    <div class="stat-chip">AUDIO CLEANED UP <b>${s.preprocess.denoise_applied ? 'Yes' : 'No'}</b></div>
   `;
 
   downloadsEl.innerHTML = '';
@@ -166,33 +149,3 @@ function renderResults(jobId, result) {
     downloadsEl.appendChild(card);
   });
 }
-
-async function loadArchive() {
-  try {
-    const res = await fetch('/api/archive');
-    const data = await res.json();
-    const el = document.getElementById('archiveTable');
-    if (!data.jobs || !data.jobs.length) {
-      el.innerHTML = '<p class="dim">No jobs archived yet.</p>';
-      return;
-    }
-    let html = `<table><thead><tr>
-      <th>Job</th><th>Src→Tgt</th><th>Segments</th><th>Cache hit %</th><th>When</th>
-    </tr></thead><tbody>`;
-    data.jobs.forEach(j => {
-      html += `<tr>
-        <td>${j.job_id}</td>
-        <td>${j.source_lang} → ${j.target_lang}</td>
-        <td>${j.segment_count}</td>
-        <td>${j.cache_hit_pct}%</td>
-        <td>${j.created_at}</td>
-      </tr>`;
-    });
-    html += '</tbody></table>';
-    el.innerHTML = html;
-  } catch (err) {
-    // silent - archive dashboard is a nice-to-have
-  }
-}
-
-loadArchive();

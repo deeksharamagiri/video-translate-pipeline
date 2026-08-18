@@ -1,4 +1,10 @@
 .venv
 jobs
+models
 pipeline/__pycache__
 __pycache__
+uploads_tmp
+
+# Runtime SQLite cache (translation memory + job archive) — regenerated
+# automatically on first use, not source. data/glossary.json stays tracked.
+data/translation_memory.db
