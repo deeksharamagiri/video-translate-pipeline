@@ -8,29 +8,28 @@ Outputs:
        - Hard-codes the generated SRT subtitles into the video.
 
     2. Voiceover MP4
-       - Generates one WAV per translated segment using
-         AI4Bharat Indic Parler-TTS.
+       - Generates one WAV per translated segment using MMS-TTS.
        - Places each generated segment on the original timeline.
        - Mixes the generated segments into one WAV.
        - Muxes that WAV onto the original video.
 
-Parler-TTS is loaded lazily and cached for the lifetime of this Python
-process. This is important because the Indic Parler-TTS model is large
-and should NOT be loaded once per subtitle segment.
+MMS-TTS is loaded lazily and cached (one checkpoint per language, since
+unlike a single multilingual model, MMS-TTS ships a separate Hugging Face
+repo per language) for the lifetime of this Python process.
 """
 
 import gc
 import os
 import subprocess
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import soundfile as sf
 
 from config import (
     FFMPEG_BIN,
-    INDIC_PARLER_TTS_DEVICE,
-    INDIC_PARLER_TTS_MODEL,
-    INDIC_PARLER_VOICE_DESCRIPTIONS,
+    MMS_TTS_DEVICE,
+    MMS_TTS_LANGS,
+    resolve_torch_device,
 )
 
 from pipeline.stage3_segment_tm import Segment
@@ -111,21 +110,12 @@ def burn_in_subtitles(
 
 
 # ---------------------------------------------------------------------------
-# Parler-TTS language / configuration helpers
+# MMS-TTS language helpers
 # ---------------------------------------------------------------------------
 
 def voiceover_available(lang: str) -> bool:
-    """
-    Return True if the requested language has a configured Parler-TTS
-    voice description.
-
-    The actual model detects the language from the translated text.
-    The description controls speaker/style characteristics.
-    """
-    return (
-        isinstance(lang, str)
-        and lang.strip() in INDIC_PARLER_VOICE_DESCRIPTIONS
-    )
+    """Return True if MMS-TTS has a checkpoint for this language."""
+    return isinstance(lang, str) and lang.strip() in MMS_TTS_LANGS
 
 
 def _normalize_language(lang: str) -> str:
@@ -148,152 +138,52 @@ def _normalize_language(lang: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Lazy Parler-TTS model
+# Lazy MMS-TTS models (one checkpoint per language)
 # ---------------------------------------------------------------------------
 
-_model = None
-_tokenizer = None
-_description_tokenizer = None
-_device = None
+_mms_tts_cache = {}  # lang -> {"model", "tokenizer", "device"}
 
 
-def _get_model():
+def _get_mms_tts_model(lang: str):
     """
-    Lazily load Indic Parler-TTS.
+    Lazily load the MMS-TTS checkpoint for one language. Each language is a
+    separate Hugging Face repo, so this caches per language.
 
-    Returns:
-        model,
-        prompt tokenizer,
-        description tokenizer,
-        device
-
-    The model is loaded exactly once per Python process.
+    Returns: model, tokenizer, device.
     """
+    if lang in _mms_tts_cache:
+        c = _mms_tts_cache[lang]
+        return c["model"], c["tokenizer"], c["device"]
 
-    global _model
-    global _tokenizer
-    global _description_tokenizer
-    global _device
+    from transformers import VitsModel, AutoTokenizer
 
-    if (
-        _model is not None
-        and _tokenizer is not None
-        and _description_tokenizer is not None
-    ):
-        return (
-            _model,
-            _tokenizer,
-            _description_tokenizer,
-            _device,
-        )
+    device = resolve_torch_device(MMS_TTS_DEVICE)
+    model_name = f"facebook/mms-tts-{lang}"
 
-    import torch
+    print(f"[delivery] Loading MMS-TTS ({model_name}) on {device}.")
+    print("[delivery] The first load may download the Hugging Face model.")
 
     try:
-        from parler_tts import ParlerTTSForConditionalGeneration
+        model = VitsModel.from_pretrained(model_name)
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
     except Exception as exc:
         raise RuntimeError(
-            "Parler-TTS could not be imported.\n\n"
-            "Install it with:\n"
-            "python -m pip install --no-cache-dir "
-            "\"git+https://github.com/huggingface/parler-tts.git\"\n\n"
-            f"Original import error:\n{exc}"
-        ) from exc
-
-    from transformers import AutoTokenizer
-
-    requested_device = str(INDIC_PARLER_TTS_DEVICE).strip().lower()
-
-    # ---------------------------------------------------------------
-    # Device selection
-    # ---------------------------------------------------------------
-
-    if requested_device.startswith("cuda"):
-        if torch.cuda.is_available():
-            device = requested_device
-        else:
-            print(
-                "[delivery] CUDA was requested, but CUDA is unavailable. "
-                "Using CPU."
-            )
-            device = "cpu"
-
-    elif requested_device in {"mps", "mps:0"}:
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            device = "mps"
-        else:
-            print(
-                "[delivery] MPS was requested, but MPS is unavailable. "
-                "Using CPU."
-            )
-            device = "cpu"
-
-    else:
-        device = "cpu"
-
-    print(
-        f"[delivery] Loading Indic Parler-TTS "
-        f"({INDIC_PARLER_TTS_MODEL}) on {device}."
-    )
-    print(
-        "[delivery] The first load may download the Hugging Face model."
-    )
-
-    try:
-        model = ParlerTTSForConditionalGeneration.from_pretrained(
-            INDIC_PARLER_TTS_MODEL
-        )
-    except Exception as exc:
-        raise RuntimeError(
-            f"Unable to load Parler-TTS model "
-            f"'{INDIC_PARLER_TTS_MODEL}'.\n\n"
-            f"Original error:\n{exc}"
+            f"Could not load MMS-TTS ('{model_name}') for language '{lang}'. "
+            f"Original error: {exc}"
         ) from exc
 
     model = model.to(device)
     model.eval()
 
-    # ---------------------------------------------------------------
-    # Two-tokenizer setup used by Indic Parler-TTS
-    # ---------------------------------------------------------------
+    _mms_tts_cache[lang] = {"model": model, "tokenizer": tokenizer, "device": device}
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        INDIC_PARLER_TTS_MODEL
-    )
+    print(f"[delivery] MMS-TTS ({model_name}) ready.")
 
-    text_encoder_name = getattr(
-        model.config.text_encoder,
-        "_name_or_path",
-        None,
-    )
-
-    if not text_encoder_name:
-        raise RuntimeError(
-            "Could not determine the Parler-TTS text encoder tokenizer "
-            "from model.config.text_encoder._name_or_path."
-        )
-
-    description_tokenizer = AutoTokenizer.from_pretrained(
-        text_encoder_name
-    )
-
-    _model = model
-    _tokenizer = tokenizer
-    _description_tokenizer = description_tokenizer
-    _device = device
-
-    print("[delivery] Indic Parler-TTS ready.")
-
-    return (
-        _model,
-        _tokenizer,
-        _description_tokenizer,
-        _device,
-    )
+    return model, tokenizer, device
 
 
 # ---------------------------------------------------------------------------
-# Parler-TTS generation
+# MMS-TTS generation
 # ---------------------------------------------------------------------------
 
 def _synthesize_segment_wav(
@@ -302,123 +192,53 @@ def _synthesize_segment_wav(
     out_wav_path: str,
 ) -> str:
     """
-    Generate speech for one translated segment.
-
-    `text` is the translated text.
-
-    `lang` is used to select the configured speaker/style description.
-
-    The Parler-TTS model detects the spoken language from the prompt text.
+    Generate speech for one translated segment via MMS-TTS. One fixed voice
+    per language; the whole waveform is generated in one non-autoregressive
+    forward pass.
     """
-
     lang = _normalize_language(lang)
 
     if not text or not text.strip():
-        raise ValueError(
-            "Cannot synthesize an empty TTS segment."
-        )
+        raise ValueError("Cannot synthesize an empty TTS segment.")
 
-    description = INDIC_PARLER_VOICE_DESCRIPTIONS.get(lang)
-
-    if not description:
-        available = ", ".join(
-            sorted(INDIC_PARLER_VOICE_DESCRIPTIONS.keys())
-        )
-
+    if lang not in MMS_TTS_LANGS:
+        available = ", ".join(sorted(MMS_TTS_LANGS))
         raise RuntimeError(
-            f"No Parler-TTS voice description is configured for "
-            f"language '{lang}'.\n\n"
-            f"Languages currently configured in config.py:\n"
-            f"{available}"
+            f"No MMS-TTS checkpoint is configured for language '{lang}'.\n\n"
+            f"Languages currently configured in config.py:\n{available}"
         )
 
-    model, tokenizer, description_tokenizer, device = _get_model()
+    model, tokenizer, device = _get_mms_tts_model(lang)
 
     import torch
 
     print(
-        f"[delivery] TTS: language={lang}, "
+        f"[delivery] TTS (MMS-TTS): language={lang}, "
         f"characters={len(text)}, "
         f"output={out_wav_path}"
     )
 
-    # ---------------------------------------------------------------
-    # Tokenize description and translated text
-    # ---------------------------------------------------------------
-
-    description_inputs = description_tokenizer(
-        description,
-        return_tensors="pt",
-    )
-
-    prompt_inputs = tokenizer(
-        text.strip(),
-        return_tensors="pt",
-    )
-
-    description_input_ids = description_inputs.input_ids.to(device)
-    description_attention_mask = (
-        description_inputs.attention_mask.to(device)
-    )
-
-    prompt_input_ids = prompt_inputs.input_ids.to(device)
-    prompt_attention_mask = prompt_inputs.attention_mask.to(device)
-
-    # ---------------------------------------------------------------
-    # Generate
-    # ---------------------------------------------------------------
+    inputs = tokenizer(text.strip(), return_tensors="pt")
+    input_ids = inputs.input_ids.to(device)
 
     try:
-        with torch.inference_mode():
-            generation = model.generate(
-                input_ids=description_input_ids,
-                attention_mask=description_attention_mask,
-                prompt_input_ids=prompt_input_ids,
-                prompt_attention_mask=prompt_attention_mask,
-            )
-
-        audio_arr = generation.detach().cpu().numpy().squeeze()
-
+        with torch.no_grad():
+            outputs = model(input_ids)
+        audio_arr = outputs.waveform.detach().cpu().numpy().squeeze()
     finally:
-        # Release segment-level tensors immediately.
-        del description_inputs
-        del prompt_inputs
-        del description_input_ids
-        del description_attention_mask
-        del prompt_input_ids
-        del prompt_attention_mask
-
+        del inputs
+        del input_ids
         gc.collect()
 
-    # ---------------------------------------------------------------
-    # Validate generated audio
-    # ---------------------------------------------------------------
-
     if audio_arr.size == 0:
-        raise RuntimeError(
-            f"Parler-TTS generated empty audio for language '{lang}'."
-        )
+        raise RuntimeError(f"MMS-TTS generated empty audio for language '{lang}'.")
 
     sampling_rate = int(model.config.sampling_rate)
-
     if sampling_rate <= 0:
-        raise RuntimeError(
-            f"Invalid Parler-TTS sampling rate: {sampling_rate}"
-        )
+        raise RuntimeError(f"Invalid MMS-TTS sampling rate: {sampling_rate}")
 
-    os.makedirs(
-        os.path.dirname(os.path.abspath(out_wav_path)),
-        exist_ok=True,
-    )
-
-    # PCM_16 gives a conventional WAV suitable for FFmpeg and downstream
-    # processing.
-    sf.write(
-        out_wav_path,
-        audio_arr,
-        sampling_rate,
-        subtype="PCM_16",
-    )
+    os.makedirs(os.path.dirname(os.path.abspath(out_wav_path)), exist_ok=True)
+    sf.write(out_wav_path, audio_arr, sampling_rate, subtype="PCM_16")
 
     return out_wav_path
 
@@ -446,13 +266,21 @@ def _get_sequential_timeline(
     segment_starts: List[float],
     segment_durations: List[float],
     min_gap_sec: float = 0.05,
+    max_gap_sec: float = 0.4,
 ) -> List[float]:
     """
-    Preserve original segment timestamps while preventing generated
-    TTS clips from overlapping.
+    Places generated TTS clips on a timeline derived from, but not strictly
+    bound to, the original segment timestamps.
 
-    If generated TTS takes longer than the original subtitle interval,
-    the following clip is moved forward rather than overlapping it.
+    If generated TTS takes longer than the original subtitle interval, the
+    following clip is moved forward rather than overlapping it (min_gap_sec
+    apart). If TTS finishes well before the next segment's original
+    timestamp — the common case, since translated/synthesized speech
+    duration essentially never matches the original audio's pacing — the
+    next clip is pulled forward too, capping dead air between segments at
+    max_gap_sec instead of leaving it at whatever gap existed in the
+    original video. Without this cap, voiceover narration has an audible
+    silent "hole" before nearly every segment.
     """
 
     if not segment_starts:
@@ -480,6 +308,10 @@ def _get_sequential_timeline(
             desired_start = max(
                 start,
                 cursor_end + min_gap_sec,
+            )
+            desired_start = min(
+                desired_start,
+                cursor_end + max_gap_sec,
             )
 
         adjusted_starts.append(desired_start)
@@ -510,7 +342,8 @@ def build_voiceover_track(
 
     if not voiceover_available(target_lang):
         raise RuntimeError(
-            f"Voiceover is not configured for language '{target_lang}'."
+            f"Voiceover is not configured for language '{target_lang}'. "
+            f"MMS-TTS covers: {', '.join(sorted(MMS_TTS_LANGS))}."
         )
 
     tts_dir = os.path.join(

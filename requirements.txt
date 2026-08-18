@@ -34,6 +34,14 @@ sacremoses==0.1.1
 indic-nlp-library==0.92
 IndicTransToolkit==1.1.1
 
+# Krutrim-Translate (English<->Indic, 9 languages) — ships as CTranslate2-
+# exported weights, run through pipeline/krutrim_engine (the model's own
+# vendored reference inference code, not `transformers`).
+# ctranslate2 is already pulled in by faster-whisper above; pinned here since
+# it's now also a direct dependency.
+
+ctranslate2==4.8.1
+
 # Reports
 
 python-docx==1.1.2

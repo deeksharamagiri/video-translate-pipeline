@@ -8,8 +8,6 @@
 </head>
 <body>
 
-<div class="scanline"></div>
-
 <header class="topbar">
   <div class="topbar-inner">
     <div class="brand">
@@ -59,28 +57,21 @@
           <option value="pan">Punjabi</option>
           <option value="urd">Urdu</option>
           <option value="eng">English</option>
-          <option value="fra">French</option>
-          <option value="spa">Spanish</option>
-          <option value="ara">Arabic</option>
         </select>
       </label>
       <label class="field">
         <span>Target language</span>
         <select id="targetLang">
           <option value="hin">Hindi</option>
-          <option value="eng">English</option>
           <option value="mar">Marathi</option>
           <option value="ben">Bengali</option>
           <option value="tam">Tamil</option>
           <option value="tel">Telugu</option>
-          <option value="kan">Kannada</option>
           <option value="mal">Malayalam</option>
           <option value="guj">Gujarati</option>
           <option value="pan">Punjabi</option>
-          <option value="urd">Urdu</option>
-          <option value="fra">French</option>
-          <option value="spa">Spanish</option>
-          <option value="ara">Arabic</option>
+          <option value="asm">Assamese</option>
+          <option value="mai">Maithili</option>
         </select>
       </label>
     </div>
@@ -90,8 +81,9 @@
         <span>Translation engine</span>
         <select id="engineChoice">
           <option value="auto">Auto (per architecture diagram)</option>
-          <option value="nllb">Force NLLB-200-distilled-600M</option>
-          <option value="indictrans2">Force IndicTrans2</option>
+          <option value="indictrans2">Force IndicTrans2 (Indic↔Indic)</option>
+          <option value="krutrim">Force Krutrim-Translate (English↔Indic, fast)</option>
+          <option value="indictrans2-en">Force IndicTrans2 en-indic-1B (English↔Indic, slow)</option>
         </select>
       </label>
       <div></div>
@@ -100,11 +92,11 @@
     <div class="grid2">
       <label class="check">
         <input type="checkbox" id="wantBurnedIn">
-        <span>Generate burned-in subtitle MP4 <em>(video only)</em></span>
+        <span>Add on-screen subtitles <em>(video only)</em></span>
       </label>
       <label class="check">
         <input type="checkbox" id="wantVoiceover">
-        <span>Generate voiceover MP4 (Indic Parler-TTS) <em>(video only)</em></span>
+        <span>Add spoken narration in the target language <em>(video only)</em></span>
       </label>
     </div>
 
@@ -113,16 +105,7 @@
   </section>
 
   <section class="panel pipeline-panel" id="pipelinePanel" hidden>
-    <h2><span class="tag">02</span> Pipeline Progress</h2>
-    <div class="pipeline-track" id="pipelineTrack">
-      <div class="stage" data-stage="stage1"><div class="stage-dot"></div><div class="stage-label">Pre-Processing</div></div>
-      <div class="stage" data-stage="asr"><div class="stage-dot"></div><div class="stage-label">ASR / Subtitle Extract</div></div>
-      <div class="stage" data-stage="stage3"><div class="stage-dot"></div><div class="stage-label">Segment + TM Check</div></div>
-      <div class="stage" data-stage="translate"><div class="stage-dot"></div><div class="stage-label">Translate</div></div>
-      <div class="stage" data-stage="stage4"><div class="stage-dot"></div><div class="stage-label">Subtitle Gen</div></div>
-      <div class="stage" data-stage="stage5"><div class="stage-dot"></div><div class="stage-label">Archive & Reuse</div></div>
-      <div class="stage" data-stage="done"><div class="stage-dot"></div><div class="stage-label">Delivery</div></div>
-    </div>
+    <h2><span class="tag">02</span> Processing</h2>
     <div class="progress-bar-outer"><div class="progress-bar-inner" id="progressBarInner"></div></div>
     <p class="progress-msg" id="progressMsg">Waiting...</p>
   </section>
@@ -134,13 +117,6 @@
     <div class="stats-row" id="statsRow"></div>
 
     <div class="downloads" id="downloads"></div>
-  </section>
-
-  <section class="panel archive-panel">
-    <h2><span class="tag">↻</span> Translation Memory — Recent Jobs</h2>
-    <div id="archiveTable" class="archive-table">
-      <p class="dim">No jobs archived yet.</p>
-    </div>
   </section>
 
 </main>

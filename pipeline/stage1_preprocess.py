@@ -135,11 +135,6 @@ def apply_denoise(in_wav_path, out_wav_path):
     return out_wav_path
 
 
-def get_duration_seconds(input_path):
-    info = probe_streams(input_path)
-    return float(info.get("format", {}).get("duration", 0.0))
-
-
 def run_stage1(input_path, work_dir, input_kind):
     """
     Full Stage 1 pipeline.
