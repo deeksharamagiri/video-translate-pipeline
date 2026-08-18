@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Offline Field Translator</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8C%BE%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -17,16 +18,42 @@
         <div class="brand-sub">Office Processing → Offline Delivery</div>
       </div>
     </div>
-    <div class="net-status" id="netStatus">
-      <span class="dot"></span> LOCAL / OFFLINE-READY
-    </div>
   </div>
 </header>
 
 <main class="wrap">
 
+  <section class="hero">
+    <h1 class="hero-title">Every voice, translated —<br><span>right in the field.</span></h1>
+    <p class="hero-desc">Drop in a recording and get subtitles plus a dubbed voiceover in the language your audience speaks. Built for outreach teams working where the internet doesn't reach.</p>
+    <div class="hero-features">
+      <div class="hero-feature"><span class="hf-icon">🌐</span> 10 Indian languages</div>
+      <div class="hero-feature"><span class="hf-icon">🎧</span> Video &amp; audio input</div>
+      <div class="hero-feature"><span class="hf-icon">📦</span> Ready for USB transfer</div>
+    </div>
+  </section>
+
+  <div class="hero-divider" aria-hidden="true"><span></span>🌾<span></span></div>
+
+  <div class="stepper" aria-hidden="true">
+    <div class="step" data-step="1">
+      <div class="step-circle"><span class="step-num">🌱</span><span class="step-check">✓</span></div>
+      <div class="step-label">Sow</div>
+    </div>
+    <div class="step-line"></div>
+    <div class="step" data-step="2">
+      <div class="step-circle"><span class="step-num">🌿</span><span class="step-check">✓</span></div>
+      <div class="step-label">Grow</div>
+    </div>
+    <div class="step-line"></div>
+    <div class="step" data-step="3">
+      <div class="step-circle"><span class="step-num">🧺</span><span class="step-check">✓</span></div>
+      <div class="step-label">Harvest</div>
+    </div>
+  </div>
+
   <section class="panel upload-panel">
-    <h2><span class="tag">01</span> Load Source Media</h2>
+    <h2><span class="tag">🌱</span> Load Source Media</h2>
 
     <div class="dropzone" id="dropzone">
       <input type="file" id="fileInput" accept=".mp4,.mkv,.mp3,.wav,.ogg" hidden>
@@ -41,76 +68,37 @@
       </div>
     </div>
 
-    <div class="grid2">
-      <label class="field">
-        <span>Source language (leave blank to auto-detect)</span>
-        <select id="sourceLang">
-          <option value="">Auto-detect</option>
-          <option value="hin">Hindi</option>
-          <option value="mar">Marathi</option>
-          <option value="ben">Bengali</option>
-          <option value="tam">Tamil</option>
-          <option value="tel">Telugu</option>
-          <option value="kan">Kannada</option>
-          <option value="mal">Malayalam</option>
-          <option value="guj">Gujarati</option>
-          <option value="pan">Punjabi</option>
-          <option value="urd">Urdu</option>
-          <option value="eng">English</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>Target language</span>
-        <select id="targetLang">
-          <option value="hin">Hindi</option>
-          <option value="mar">Marathi</option>
-          <option value="ben">Bengali</option>
-          <option value="tam">Tamil</option>
-          <option value="tel">Telugu</option>
-          <option value="mal">Malayalam</option>
-          <option value="guj">Gujarati</option>
-          <option value="pan">Punjabi</option>
-          <option value="asm">Assamese</option>
-          <option value="mai">Maithili</option>
-        </select>
-      </label>
-    </div>
+    <label class="field field-solo">
+      <span>Target language</span>
+      <select id="targetLang">
+        <option value="hin">Hindi</option>
+        <option value="mar">Marathi</option>
+        <option value="ben">Bengali</option>
+        <option value="tam">Tamil</option>
+        <option value="tel">Telugu</option>
+        <option value="mal">Malayalam</option>
+        <option value="guj">Gujarati</option>
+        <option value="pan">Punjabi</option>
+        <option value="asm">Assamese</option>
+        <option value="mai">Maithili</option>
+      </select>
+    </label>
 
-    <div class="grid2">
-      <label class="field">
-        <span>Translation engine</span>
-        <select id="engineChoice">
-          <option value="auto">Auto (per architecture diagram)</option>
-          <option value="indictrans2">Force IndicTrans2 (Indic↔Indic, English↔Indic)</option>
-          <option value="nllb">Force NLLB-200 (other language pairs)</option>
-        </select>
-      </label>
-      <div></div>
-    </div>
-
-    <div class="grid2">
-      <label class="check">
-        <input type="checkbox" id="wantBurnedIn">
-        <span>Add on-screen subtitles <em>(video only)</em></span>
-      </label>
-      <label class="check">
-        <input type="checkbox" id="wantVoiceover">
-        <span>Add spoken narration in the target language <em>(video only)</em></span>
-      </label>
-    </div>
-
-    <button id="submitBtn" class="btn-primary" disabled>Run Pipeline</button>
+    <button id="submitBtn" class="btn-primary" disabled><span class="btn-icon">🚜</span> Run Pipeline</button>
     <p class="error" id="formError" hidden></p>
   </section>
 
   <section class="panel pipeline-panel" id="pipelinePanel" hidden>
-    <h2><span class="tag">02</span> Processing</h2>
+    <h2><span class="tag">🌿</span> Processing</h2>
     <div class="progress-bar-outer"><div class="progress-bar-inner" id="progressBarInner"></div></div>
-    <p class="progress-msg" id="progressMsg">Waiting...</p>
+    <div class="progress-status">
+      <span class="spinner" aria-hidden="true"></span>
+      <p class="progress-msg" id="progressMsg">Waiting...</p>
+    </div>
   </section>
 
   <section class="panel results-panel" id="resultsPanel" hidden>
-    <h2><span class="tag">03</span> Output Folder</h2>
+    <h2><span class="tag">🧺</span> Output Folder</h2>
     <p class="results-sub">Ready for USB transfer / offline field playback.</p>
 
     <div class="stats-row" id="statsRow"></div>
