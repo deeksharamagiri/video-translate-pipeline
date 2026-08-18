@@ -1,4 +1,5 @@
 .venv
+.venv-tts
 jobs
 models
 pipeline/__pycache__

@@ -5,6 +5,7 @@ bottom (SRT + VTT + Job Report always; Burned-in MP4 / Voiceover MP4 opt-in).
 """
 import os
 import shutil
+import time
 import uuid
 from typing import Callable, Optional
 
@@ -26,19 +27,13 @@ def run_job(input_path: str, source_lang_hint: Optional[str], target_lang: str,
             want_burned_in: bool, want_voiceover: bool,
             progress_cb: Optional[Callable] = None,
             engine_override: str = "auto",
-            job_id: Optional[str] = None) -> dict:
+            asr_engine: str = "whisper",
+            tts_speaker: Optional[str] = None) -> dict:
     """
     Full pipeline run for one uploaded file. Returns a dict describing all
     output file paths + stats, ready to hand back to the Flask route.
-
-    job_id: the caller's job id (e.g. app.py's JOBS-dict key, used for
-    status polling/downloads) — the `jobs/<job_id>/` folder and the
-    returned outputs["job_id"] use this same value, so everything the
-    caller sees stays consistent. Generates one if not provided (e.g. for
-    standalone/CLI use).
     """
-    if job_id is None:
-        job_id = uuid.uuid4().hex[:12]
+    job_id = uuid.uuid4().hex[:12]
     job_dir = os.path.join(JOBS_DIR, job_id)
     work_dir = os.path.join(job_dir, "work")
     out_dir = os.path.join(job_dir, "output")
@@ -66,13 +61,17 @@ def run_job(input_path: str, source_lang_hint: Optional[str], target_lang: str,
         asr_segments, detected_lang = _segments_from_srt(pre.subtitle_srt_path)
     else:
         _progress(progress_cb, "stage2", "Running speech recognition (faster-whisper)...", 20)
-        asr_result = stage2_asr.run_stage2(
-            pre.audio_wav_path, language_hint=_to_whisper_lang(source_lang_hint)
-        )
+        asr_result = stage2_asr.run_stage2(pre.audio_wav_path, language_hint=source_lang_hint)
         asr_segments = asr_result.segments
         detected_lang = source_lang_hint or asr_result.detected_language
 
     source_lang = _normalize_lang(source_lang_hint or detected_lang)
+
+    if asr_engine == "indic_conformer":
+        _progress(progress_cb, "asr_refine", "Refining transcript with IndicConformer...", 30)
+        asr_segments = stage2_asr.refine_segments_with_indic_conformer(
+            asr_segments, pre.audio_wav_path, source_lang
+        )
 
     # ---------------- Stage 3 — Segmentation + TM check ----------------
     _progress(progress_cb, "stage3", "Segmenting & checking translation memory...", 45)
@@ -80,38 +79,23 @@ def run_job(input_path: str, source_lang_hint: Optional[str], target_lang: str,
     model_version = translate.model_version_tag(source_lang, target_lang, engine_override)
 
     segments = stage3_segment_tm.chunk_segments(asr_segments, source_lang, target_lang)
-
-    # Group ASR-timed fragments up to sentence boundaries before translating,
-    # so the engine sees full sentences instead of pause-cut fragments (e.g.
-    # "and pull into an auto repair shop." with no subject) — subtitle cue
-    # count/timing is unaffected, Stage 4 still renders one cue per Segment.
-    groups = stage3_segment_tm.group_sentences(segments)
-    miss_groups = stage3_segment_tm.apply_translation_memory(
-        groups, source_lang, target_lang, glossary_version, model_version
+    misses = stage3_segment_tm.apply_translation_memory(
+        segments, source_lang, target_lang, glossary_version, model_version
     )
 
-    # ---------------- Translation engine (indic-indic vs en-indic/indic-en) ----------------
+    # ---------------- Translation engine (Indic vs NLLB) ----------------
     engine_name = "Translation Memory (cache only)"
-    if miss_groups:
+    if misses:
         _progress(progress_cb, "translate",
-                   f"Translating {len(miss_groups)} new sentence(s)...", 60)
-        # Prepend each sentence's predecessor as extra (discarded-after)
-        # context, so isolated one-liners like "She yells." have something
-        # to anchor cross-sentence agreement (e.g. pronoun gender) against.
-        context_batch = stage3_segment_tm.build_context_batch(groups, miss_groups)
-        texts = [text for text, _ in context_batch]
+                   f"Translating {len(misses)} new segment(s)...", 60)
+        texts = [s.text for s in misses]
         translated_texts, engine_name = translate.translate_batch(
             texts, source_lang, target_lang, engine_override
         )
-        translated_texts = [
-            stage3_segment_tm.strip_context_prefix(translated, had_context)
-            for translated, (_, had_context) in zip(translated_texts, context_batch)
-        ]
-        stage3_segment_tm.assign_group_translations(miss_groups, translated_texts)
+        for seg, tr in zip(misses, translated_texts):
+            seg.translated_text = tr
     else:
         _progress(progress_cb, "translate", "All segments served from translation memory.", 60)
-
-    segments = stage3_segment_tm.merge_empty_members(segments)
 
     # ---------------- Stage 4 — Subtitle Generation ----------------
     _progress(progress_cb, "stage4", "Generating SRT/VTT subtitle files...", 75)
@@ -130,7 +114,7 @@ def run_job(input_path: str, source_lang_hint: Optional[str], target_lang: str,
     # ---------------- Stage 5 — Archive & Reuse ----------------
     _progress(progress_cb, "stage5", "Archiving segments for future reuse...", 85)
     archive_stats = stage5_archive.archive_job(
-        job_id, segments, groups, source_lang, target_lang, glossary_version, model_version
+        job_id, segments, source_lang, target_lang, glossary_version, model_version
     )
 
     outputs = {
@@ -150,12 +134,19 @@ def run_job(input_path: str, source_lang_hint: Optional[str], target_lang: str,
     voiceover_source_for_burn = None
 
     if input_kind == "video" and want_voiceover:
-        _progress(progress_cb, "voiceover", "Synthesising voiceover (MMS-TTS)...", 92)
-        voiceover_wav = delivery.build_voiceover_track(segments, target_lang, work_dir)
-        voiceover_path = os.path.join(out_dir, f"{job_id}_voiceover.mp4")
-        delivery.mux_voiceover_onto_video(local_input, voiceover_wav, voiceover_path)
-        outputs["voiceover_mp4"] = voiceover_path
-        voiceover_source_for_burn = voiceover_path
+        if not delivery.voiceover_available(target_lang):
+            _progress(progress_cb, "voiceover",
+                      f"No Indic-TTS support for '{target_lang}' -- skipping voiceover.", 92)
+        else:
+            _progress(progress_cb, "voiceover", "Synthesising voiceover (Indic-TTS)...", 92)
+            voiceover_wav = delivery.build_voiceover_track(
+                segments, target_lang, work_dir,
+                speaker=tts_speaker,
+            )
+            voiceover_path = os.path.join(out_dir, f"{job_id}_voiceover.mp4")
+            delivery.mux_voiceover_onto_video(local_input, voiceover_wav, voiceover_path)
+            outputs["voiceover_mp4"] = voiceover_path
+            voiceover_source_for_burn = voiceover_path
 
     if input_kind == "video" and want_burned_in:
         _progress(progress_cb, "burned_in", "Burning subtitles into video...", 96)
@@ -184,29 +175,15 @@ def run_job(input_path: str, source_lang_hint: Optional[str], target_lang: str,
     return outputs
 
 
-_TWO_TO_THREE_LANG = {
-    "hi": "hin", "en": "eng", "mr": "mar", "bn": "ben", "ta": "tam", "te": "tel",
-    "kn": "kan", "ml": "mal", "gu": "guj", "pa": "pan", "ur": "urd", "or": "ori",
-    "as": "asm", "ne": "nep", "sa": "san", "fr": "fra", "es": "spa", "de": "deu",
-    "zh": "zho", "ar": "ara", "pt": "por", "ru": "rus", "ja": "jpn",
-}
-_THREE_TO_TWO_LANG = {v: k for k, v in _TWO_TO_THREE_LANG.items()}
-
-
 def _normalize_lang(code: str) -> str:
     """faster-whisper returns ISO 639-1 (e.g. 'hi'); normalize common ones to our 3-letter set."""
-    return _TWO_TO_THREE_LANG.get(code, code)
-
-
-def _to_whisper_lang(code: Optional[str]) -> Optional[str]:
-    """
-    Our UI/internal codes are 3-letter (e.g. 'eng', 'hin'); faster-whisper's
-    `language=` hint wants ISO 639-1 2-letter codes (e.g. 'en', 'hi') and
-    raises ValueError on anything else. None (auto-detect) passes through.
-    """
-    if not code:
-        return None
-    return _THREE_TO_TWO_LANG.get(code, code)
+    two_to_three = {
+        "hi": "hin", "en": "eng", "mr": "mar", "bn": "ben", "ta": "tam", "te": "tel",
+        "kn": "kan", "ml": "mal", "gu": "guj", "pa": "pan", "ur": "urd", "or": "ori",
+        "as": "asm", "ne": "nep", "sa": "san", "fr": "fra", "es": "spa", "de": "deu",
+        "zh": "zho", "ar": "ara", "pt": "por", "ru": "rus", "ja": "jpn",
+    }
+    return two_to_three.get(code, code)
 
 
 def _segments_from_srt(srt_path: str):

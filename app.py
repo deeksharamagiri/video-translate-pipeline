@@ -6,6 +6,7 @@ Routes:
   POST /api/upload            -> accept file + params, start background job, return job_id
   GET  /api/status/<job_id>   -> poll progress
   GET  /api/download/<job_id>/<kind> -> download an output file
+  GET  /api/archive           -> reuse dashboard data
 """
 import os
 import threading
@@ -17,9 +18,11 @@ from werkzeug.utils import secure_filename
 
 from config import (
     HOST, PORT, ALLOWED_VIDEO_EXT, ALLOWED_AUDIO_EXT,
-    MAX_VIDEO_SIZE_MB, MAX_AUDIO_SIZE_MB
+    MAX_VIDEO_SIZE_MB, MAX_AUDIO_SIZE_MB, JOBS_DIR,
+    ENGINE_CHOICES, ASR_ENGINE_CHOICES,
 )
 from pipeline.orchestrator import run_job, JobError
+from pipeline.stage5_archive import get_archive_stats
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = max(MAX_VIDEO_SIZE_MB, MAX_AUDIO_SIZE_MB) * 1024 * 1024
@@ -72,10 +75,20 @@ def upload():
     want_burned_in = request.form.get("burned_in") == "true"
     want_voiceover = request.form.get("voiceover") == "true"
 
-    from config import ENGINE_CHOICES
     engine_override = request.form.get("engine", "auto")
     if engine_override not in ENGINE_CHOICES:
         engine_override = "auto"
+
+    asr_engine = request.form.get("asr_engine", "whisper")
+    if asr_engine not in ASR_ENGINE_CHOICES:
+        asr_engine = "whisper"
+
+    # Voiceover TTS is AI4Bharat/Indic-TTS (Piper, IndicF5, and Indic
+    # Parler-TTS were all tried and removed). Optional male/female override;
+    # falls back to config.INDIC_TTS_DEFAULT_SPEAKER if omitted.
+    tts_speaker = request.form.get("tts_speaker") or None
+    if tts_speaker not in (None, "male", "female"):
+        tts_speaker = None
 
     job_id = uuid.uuid4().hex[:12]
     with JOBS_LOCK:
@@ -92,7 +105,8 @@ def upload():
                 saved_path, source_lang_hint, target_lang,
                 want_burned_in, want_voiceover, progress_cb=_progress_cb,
                 engine_override=engine_override,
-                job_id=job_id,
+                asr_engine=asr_engine,
+                tts_speaker=tts_speaker,
             )
             with JOBS_LOCK:
                 JOBS[job_id]["result"] = result
@@ -156,6 +170,11 @@ def download(job_id, kind):
     return send_file(path, as_attachment=True)
 
 
+@app.route("/api/archive")
+def archive():
+    return jsonify({"jobs": get_archive_stats()})
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("Offline Field Translator")
@@ -166,15 +185,20 @@ if __name__ == "__main__":
     print("job after that runs fully offline.")
     if not os.environ.get("HF_TOKEN"):
         print()
-        print("NOTE: IndicTrans2 (all three checkpoints — indic-indic, en-indic,")
-        print("indic-en) and Krutrim-Translate (English<->Hindi/Bengali/Kannada/")
-        print("Marathi/Malayalam/Gujarati/Punjabi/Telugu/Tamil) are free but 'gated'")
-        print("models on Hugging Face. Accept the terms once while logged in at:")
-        print("  https://huggingface.co/ai4bharat/indictrans2-indic-indic-1B")
-        print("  https://huggingface.co/ai4bharat/indictrans2-en-indic-1B")
-        print("  https://huggingface.co/ai4bharat/indictrans2-indic-en-1B")
-        print("  https://huggingface.co/krutrim-ai-labs/Krutrim-Translate")
+        print("NOTE: IndicTrans2 (used for Indic<->Indic and English<->Indic")
+        print("translation) is a free but 'gated' model on Hugging Face. If a job")
+        print("using it fails, accept the terms once while logged in at:")
+        print("  https://huggingface.co/ai4bharat/indictrans2-indic-indic-dist-320M")
+        print("  https://huggingface.co/ai4bharat/indictrans2-en-indic-dist-200M")
+        print("  https://huggingface.co/ai4bharat/indictrans2-indic-en-dist-200M")
         print("then set:  export HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx   and restart.")
-        print("Voiceover (MMS-TTS) isn't gated and doesn't need this.")
+        print("Translations into/from other languages via NLLB-200 don't need this.")
+    print()
+    print("NOTE: Voiceover uses AI4Bharat/Indic-TTS (FastPitch+HiFi-GAN, MIT")
+    print("licensed, no HF login needed) in a SEPARATE venv (.venv-tts) to avoid")
+    print("a transformers version conflict with IndicTrans2/NLLB. One-time setup:")
+    print("  python3 -m venv .venv-tts")
+    print("  .venv-tts/bin/pip install -r tts_worker/requirements.txt")
+    print("Checkpoints (~1.5GB/language) download automatically on first use.")
     print("=" * 70)
     app.run(host=HOST, port=PORT, debug=False, threaded=True)

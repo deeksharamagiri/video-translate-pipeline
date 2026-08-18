@@ -15,7 +15,7 @@ import wave
 
 import numpy as np
 
-from config import TARGET_SAMPLE_RATE, SNR_DENOISE_THRESHOLD_DB, FFMPEG_BIN, FFPROBE_BIN
+from config import TARGET_SAMPLE_RATE, SNR_DENOISE_THRESHOLD_DB
 
 
 class PreprocessResult:
@@ -53,7 +53,7 @@ def _run(cmd):
 def probe_streams(input_path):
     """Return ffprobe stream info as a list of dicts."""
     out = _run([
-        FFPROBE_BIN, "-v", "quiet", "-print_format", "json",
+        "ffprobe", "-v", "quiet", "-print_format", "json",
         "-show_streams", "-show_format", input_path
     ])
     return json.loads(out)
@@ -70,7 +70,7 @@ def detect_subtitle_stream(streams_info):
 def extract_embedded_subtitles(input_path, stream_index, out_srt_path):
     """Pull an embedded subtitle track out to .srt using its own timestamps."""
     _run([
-        FFMPEG_BIN, "-y", "-i", input_path,
+        "ffmpeg", "-y", "-i", input_path,
         "-map", f"0:{stream_index}", out_srt_path
     ])
     return out_srt_path
@@ -79,7 +79,7 @@ def extract_embedded_subtitles(input_path, stream_index, out_srt_path):
 def extract_audio_to_wav(input_path, out_wav_path, sample_rate=TARGET_SAMPLE_RATE):
     """Extract + normalise to mono WAV at target sample rate."""
     _run([
-        FFMPEG_BIN, "-y", "-i", input_path,
+        "ffmpeg", "-y", "-i", input_path,
         "-vn",                      # no video
         "-ac", "1",                 # mono
         "-ar", str(sample_rate),    # sample rate
@@ -128,11 +128,16 @@ def estimate_snr_db(wav_path):
 def apply_denoise(in_wav_path, out_wav_path):
     """FFmpeg's afftdn (FFT-based denoiser) — safe default for speech."""
     _run([
-        FFMPEG_BIN, "-y", "-i", in_wav_path,
+        "ffmpeg", "-y", "-i", in_wav_path,
         "-af", "afftdn=nf=-25",
         out_wav_path
     ])
     return out_wav_path
+
+
+def get_duration_seconds(input_path):
+    info = probe_streams(input_path)
+    return float(info.get("format", {}).get("duration", 0.0))
 
 
 def run_stage1(input_path, work_dir, input_kind):

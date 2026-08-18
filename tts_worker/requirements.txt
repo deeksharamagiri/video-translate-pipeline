@@ -1,0 +1,32 @@
+# Isolated environment for Indic-TTS (FastPitch + HiFi-GAN) voiceover
+# synthesis. Kept SEPARATE from the main project's requirements.txt on
+# purpose: coqui-tts pulls in a much newer `transformers` than the
+# transformers==4.44.2 the main project pins for IndicTrans2/NLLB, and
+# installing both in one environment risks breaking translation.
+#
+# Set up once with:
+#   python3 -m venv .venv-tts
+#   .venv-tts/bin/pip install -r tts_worker/requirements.txt
+#
+# If a specific language's checkpoint (trained ~2022 against an older
+# Coqui TTS release) fails to load under this version, try pinning the
+# original (unmaintained) `TTS==0.22.0` package instead of `coqui-tts` --
+# older checkpoint configs are more likely to match that lineage exactly.
+#
+# torch/torchaudio are listed explicitly -- coqui-tts doesn't force-install
+# them (left to the user to match their hardware), and without them it
+# fails at import time with "PyTorch was not found".
+#
+# transformers is capped below 5.x: coqui-tts's own unconditional import of
+# its (unused, by us) XTTS/tortoise code references
+# transformers.pytorch_utils.isin_mps_friendly, which was removed by
+# transformers 5.x -- pinning to the last 4.x line keeps that import chain
+# working without needing to touch code we don't actually use (FastPitch +
+# HiFi-GAN, not XTTS).
+transformers>=4.57,<5
+torch
+torchaudio
+# coqui-tts's [codec] extra pulls in torchcodec, required for audio I/O
+# once torch>=2.9 (torchaudio dropped its own I/O backends at that point).
+coqui-tts[codec]
+scipy

@@ -1,0 +1,15 @@
+# Optional extras — the base `requirements.txt` install runs subtitle
+# generation and burned-in video (faster-whisper + IndicTrans2/NLLB) fine
+# without any of this. Install this file for the alternate IndicConformer
+# ASR pass.
+#
+# Voiceover TTS is NOT installed here -- it lives in its own venv
+# (.venv-tts) to avoid a transformers version conflict with IndicTrans2/
+# NLLB. Set it up separately with:
+#   python3 -m venv .venv-tts
+#   .venv-tts/bin/pip install -r tts_worker/requirements.txt
+
+# IndicConformer ASR (ai4bharat/indic-conformer-600m-multilingual)
+# Needed only if you run with asr_engine=indic_conformer.
+torchaudio
+onnxruntime
