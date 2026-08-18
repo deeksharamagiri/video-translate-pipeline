@@ -49,15 +49,15 @@ submitBtn.addEventListener('click', async () => {
   if (!selectedFile) return;
   formError.hidden = true;
   submitBtn.disabled = true;
-  submitBtn.textContent = 'Uploading...';
+  submitBtn.innerHTML = '<span class="btn-icon">⏳</span> Uploading...';
 
   const fd = new FormData();
   fd.append('file', selectedFile);
-  fd.append('source_lang', document.getElementById('sourceLang').value);
+  fd.append('source_lang', '');
   fd.append('target_lang', document.getElementById('targetLang').value);
-  fd.append('burned_in', document.getElementById('wantBurnedIn').checked ? 'true' : 'false');
-  fd.append('voiceover', document.getElementById('wantVoiceover').checked ? 'true' : 'false');
-  fd.append('engine', document.getElementById('engineChoice').value);
+  fd.append('burned_in', 'true');
+  fd.append('voiceover', 'true');
+  fd.append('engine', 'auto');
 
   try {
     const res = await fetch('/api/upload', { method: 'POST', body: fd });
@@ -66,13 +66,13 @@ submitBtn.addEventListener('click', async () => {
 
     pipelinePanel.hidden = false;
     resultsPanel.hidden = true;
-    submitBtn.textContent = 'Processing...';
+    submitBtn.innerHTML = '<span class="btn-icon">🔄</span> Processing...';
     pollStatus(data.job_id);
   } catch (err) {
     formError.textContent = err.message;
     formError.hidden = false;
     submitBtn.disabled = false;
-    submitBtn.textContent = 'Run Pipeline';
+    submitBtn.innerHTML = '<span class="btn-icon">🚜</span> Run Pipeline';
   }
 });
 
@@ -98,9 +98,10 @@ function pollStatus(jobId) {
 
       if (data.result) {
         clearInterval(interval);
+        pipelinePanel.hidden = true;
         renderResults(jobId, data.result);
         submitBtn.disabled = false;
-        submitBtn.textContent = 'Run Pipeline';
+        submitBtn.innerHTML = '<span class="btn-icon">🚜</span> Run Pipeline';
       }
     } catch (err) {
       clearInterval(interval);
@@ -110,11 +111,8 @@ function pollStatus(jobId) {
 }
 
 const DOWNLOAD_META = {
-  srt: { key: 'srt', name: 'Subtitles (.srt)', desc: 'Standard subtitle file' },
-  vtt: { key: 'vtt', name: 'Subtitles (.vtt)', desc: 'Web subtitle format' },
-  job_report_docx: { key: 'report', name: 'Job Report (.docx)', desc: 'Transcript + QC flags' },
-  burned_in_mp4: { key: 'burned_in', name: 'Burned-in Video (.mp4)', desc: 'Subtitles hard-coded' },
-  voiceover_mp4: { key: 'voiceover', name: 'Voiceover Video (.mp4)', desc: 'Dubbed audio track' },
+  vtt: { key: 'vtt', icon: '📝', name: 'Subtitles (.vtt)', desc: 'Web subtitle format' },
+  voiceover_mp4: { key: 'voiceover', icon: '🎙️', name: 'Voiceover Video (.mp4)', desc: 'Dubbed audio track' },
 };
 
 const LANG_NAMES = {
@@ -130,9 +128,7 @@ function renderResults(jobId, result) {
   const tgtName = LANG_NAMES[s.target_lang] || s.target_lang;
 
   statsRow.innerHTML = `
-    <div class="stat-chip">TRANSLATED <b>${srcName} → ${tgtName}</b></div>
-    <div class="stat-chip">ENGINE <b>${s.engine}</b></div>
-    <div class="stat-chip">AUDIO CLEANED UP <b>${s.preprocess.denoise_applied ? 'Yes' : 'No'}</b></div>
+    <div class="stat-chip"><span class="chip-icon">🌐</span> TRANSLATED <b>${srcName} → ${tgtName}</b></div>
   `;
 
   downloadsEl.innerHTML = '';
@@ -142,7 +138,7 @@ function renderResults(jobId, result) {
     const card = document.createElement('div');
     card.className = 'dl-card';
     card.innerHTML = `
-      <div class="dl-name">${meta.name}</div>
+      <div class="dl-name"><span class="chip-icon">${meta.icon}</span> ${meta.name}</div>
       <div class="dl-desc">${meta.desc}</div>
       <a href="/api/download/${jobId}/${meta.key}" download>Download</a>
     `;

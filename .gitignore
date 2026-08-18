@@ -9,3 +9,31 @@ uploads_tmp
 # Runtime SQLite cache (translation memory + job archive) — regenerated
 # automatically on first use, not source. data/glossary.json stays tracked.
 data/translation_memory.db
+
+# Python bytecode / build artifacts
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets / local env config
+.env
+.env.*
+!.env.example
+*.local
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+ 

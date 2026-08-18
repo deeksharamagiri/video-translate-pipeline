@@ -11,6 +11,7 @@ import zipfile
 from typing import List, Optional
 
 from config import (
+    FFMPEG_BINARY,
     INDIC_TTS_VENV_DIR, INDIC_TTS_WORKER_SCRIPT, INDIC_TTS_CHECKPOINTS_DIR,
     INDIC_TTS_RELEASE_BASE_URL, INDIC_TTS_LANG_ZIP_MAP, INDIC_TTS_DEFAULT_SPEAKER,
     VOICEOVER_TIME_STRETCH, VOICEOVER_MAX_TEMPO_RATIO,
@@ -38,7 +39,7 @@ def burn_in_subtitles(video_path: str, srt_path: str, out_mp4_path: str) -> str:
     """Hard-code subtitles onto the video using ffmpeg's subtitles filter."""
     escaped_srt = _escape_ffmpeg_filter_path(srt_path)
     _run([
-        "ffmpeg", "-y", "-i", video_path,
+        FFMPEG_BINARY, "-y", "-i", video_path,
         "-vf", f"subtitles='{escaped_srt}'",
         "-c:a", "copy",
         out_mp4_path
@@ -90,7 +91,7 @@ def _time_stretch_to_fit(in_wav_path: str, out_wav_path: str, target_duration: f
     if abs(ratio - 1.0) < 0.03:
         return in_wav_path
     filt = _build_atempo_chain(ratio)
-    _run(["ffmpeg", "-y", "-i", in_wav_path, "-filter:a", filt, out_wav_path])
+    _run([FFMPEG_BINARY, "-y", "-i", in_wav_path, "-filter:a", filt, out_wav_path])
     return out_wav_path
 
 
@@ -361,7 +362,7 @@ def build_voiceover_track(segments: List[Segment], target_lang: str, work_dir: s
         f"amix=inputs={len(mix_labels)}:duration=longest:dropout_transition=0[out]"
 
     out_wav = os.path.join(work_dir, "voiceover_mixed.wav")
-    cmd = ["ffmpeg", "-y"] + inputs + [
+    cmd = [FFMPEG_BINARY, "-y"] + inputs + [
         "-filter_complex", filter_complex,
         "-map", "[out]", out_wav
     ]
@@ -387,7 +388,7 @@ def mux_voiceover_onto_video(video_path: str, voiceover_wav: str, out_mp4_path: 
     """
     if mix_original_audio:
         _run([
-            "ffmpeg", "-y", "-i", video_path, "-i", voiceover_wav,
+            FFMPEG_BINARY, "-y", "-i", video_path, "-i", voiceover_wav,
             "-filter_complex",
             f"[0:a]volume={original_audio_gain_db}dB[orig];[orig][1:a]amix=inputs=2:duration=first[aout]",
             "-map", "0:v", "-map", "[aout]",
@@ -396,7 +397,7 @@ def mux_voiceover_onto_video(video_path: str, voiceover_wav: str, out_mp4_path: 
         ])
     else:
         _run([
-            "ffmpeg", "-y", "-i", video_path, "-i", voiceover_wav,
+            FFMPEG_BINARY, "-y", "-i", video_path, "-i", voiceover_wav,
             "-map", "0:v", "-map", "1:a",
             "-c:v", "copy", "-shortest",
             out_mp4_path
