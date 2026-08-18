@@ -5,7 +5,7 @@ Generates the "SRT + VTT + Job Report" always-generated output:
 from typing import List
 
 from docx import Document
-from docx.shared import RGBColor
+from docx.shared import Pt, RGBColor
 
 from pipeline.stage3_segment_tm import Segment
 
@@ -20,18 +20,18 @@ def generate_job_report(job_id: str, segments: List[Segment], source_lang: str,
     doc.add_heading("Video/Audio Translation — Job Report", level=1)
 
     meta = doc.add_paragraph()
-    meta.add_run("Job ID: ").bold = True
+    meta.add_run(f"Job ID: ").bold = True
     meta.add_run(f"{job_id}\n")
-    meta.add_run("Source language: ").bold = True
+    meta.add_run(f"Source language: ").bold = True
     meta.add_run(f"{source_lang}\n")
-    meta.add_run("Target language: ").bold = True
+    meta.add_run(f"Target language: ").bold = True
     meta.add_run(f"{target_lang}\n")
-    meta.add_run("Translation engine: ").bold = True
+    meta.add_run(f"Translation engine: ").bold = True
     meta.add_run(f"{engine_name}\n")
-    meta.add_run("Total segments: ").bold = True
+    meta.add_run(f"Total segments: ").bold = True
     meta.add_run(f"{len(segments)}\n")
     low_conf = [s for s in segments if s.confidence < LOW_CONFIDENCE_THRESHOLD]
-    meta.add_run("Low-confidence segments flagged: ").bold = True
+    meta.add_run(f"Low-confidence segments flagged: ").bold = True
     meta.add_run(f"{len(low_conf)}")
 
     doc.add_heading("Pre-Processing Notes", level=2)

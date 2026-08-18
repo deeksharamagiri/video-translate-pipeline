@@ -1,56 +1,42 @@
 # Web server
-
 flask==3.0.3
 werkzeug==3.0.3
 
 # Stage 1 - Pre-processing
-
 # static-ffmpeg auto-downloads real ffmpeg/ffprobe binaries on first run,
 # so no system-level `apt install ffmpeg` / `brew install ffmpeg` is needed.
-
 static-ffmpeg==2.5
 ffmpeg-python==0.2.0
 
 # Stage 2 - ASR
-
 faster-whisper==1.0.3
 
 # Stage 3/4 - Translation + subtitles
-
 # (sqlite3 is stdlib, no install needed)
 
 # Translation engines
-
 # (huggingface_hub is pulled in by transformers; it automatically reads the
-# HF_TOKEN environment variable if you set one, no separate login step needed)
-
-torch
+#  HF_TOKEN environment variable if you set one, no separate login step needed)
+# torch>=2.2 for stable torch.ao.quantization.quantize_dynamic (INT8 CPU
+# speedup applied to IndicTrans2/NLLB in pipeline/translate.py).
+torch>=2.2
 transformers==4.44.2
 sentencepiece==0.2.0
 sacremoses==0.1.1
 
 # IndicTrans2 official toolkit helper (tokenizer/normalizer for Indic scripts)
-
 indic-nlp-library==0.92
 IndicTransToolkit==1.1.1
 
-# Krutrim-Translate (English<->Indic, 9 languages) — ships as CTranslate2-
-# exported weights, run through pipeline/krutrim_engine (the model's own
-# vendored reference inference code, not `transformers`).
-# ctranslate2 is already pulled in by faster-whisper above; pinned here since
-# it's now also a direct dependency.
-
-ctranslate2==4.8.1
-
 # Reports
-
 python-docx==1.1.2
 
-# Audio utilities
-
-soundfile==0.13.1
-
 # Utilities
-
 numpy==1.26.4
 tqdm==4.66.4
+certifi
+
+# Optional features need extra packages not installed by default -- see
+# requirements-optional.txt. The app boots and runs subtitle/burned-in jobs
+# fine without it; asr_engine=indic_conformer requires installing that file
+# first. Voiceover (Indic-TTS) needs a SEPARATE venv -- see tts_worker/.
