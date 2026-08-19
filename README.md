@@ -62,6 +62,7 @@ English via NLLB-200 needs none of this.
 1. Create a free account: https://huggingface.co/join
 2. While logged in, open each page and click **Agree and access repository**:
    - https://huggingface.co/ai4bharat/indictrans2-en-indic-dist-200M
+   - https://huggingface.co/ai4bharat/indictrans2-indic-indic-dist-320M
    - https://huggingface.co/ai4bharat/indictrans2-indic-indic-1B
    - https://huggingface.co/ai4bharat/indictrans2-en-indic-1B
    - https://huggingface.co/ai4bharat/indictrans2-indic-en-1B
