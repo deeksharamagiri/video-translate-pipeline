@@ -135,22 +135,120 @@ def _find_checkpoint_subdir(root: str, name: str) -> Optional[str]:
     return None
 
 
-def _download_file_streamed(url: str, dest_path: str, chunk_size: int = 1024 * 1024):
-    """Streamed download with a certifi-backed SSL context -- reads in
-    chunks rather than loading the whole (~1.5GB) response into memory."""
+def _download_file_streamed(
+    url: str,
+    dest_path: str,
+    chunk_size: int = 1024 * 1024,
+    max_retries: int = 5,
+):
+    """Download a large file safely with retries and ZIP validation."""
+    import os
+    import time
     import ssl
     import urllib.request
+    import urllib.error
+    import zipfile
+
     try:
         import certifi
         ctx = ssl.create_default_context(cafile=certifi.where())
     except ImportError:
         ctx = ssl.create_default_context()
-    with urllib.request.urlopen(url, context=ctx) as resp, open(dest_path, "wb") as out:
-        while True:
-            chunk = resp.read(chunk_size)
-            if not chunk:
-                break
-            out.write(chunk)
+
+    tmp_path = dest_path + ".part"
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(
+                f"[delivery] Download attempt {attempt}/{max_retries}: "
+                f"{url}"
+            )
+
+            downloaded = 0
+
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "Offline-Field-Translator/1.0"},
+                ),
+                context=ctx,
+                timeout=120,
+            ) as resp:
+
+                total = resp.headers.get("Content-Length")
+                total = int(total) if total else None
+
+                with open(tmp_path, "wb") as out:
+                    while True:
+                        chunk = resp.read(chunk_size)
+
+                        if not chunk:
+                            break
+
+                        out.write(chunk)
+                        downloaded += len(chunk)
+
+                        if total:
+                            percent = downloaded * 100 / total
+                            print(
+                                f"\r[delivery]   "
+                                f"{downloaded / (1024**3):.2f} / "
+                                f"{total / (1024**3):.2f} GB "
+                                f"({percent:.1f}%)",
+                                end="",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                f"\r[delivery]   "
+                                f"{downloaded / (1024**3):.2f} GB",
+                                end="",
+                                flush=True,
+                            )
+
+            print()
+
+            # Make sure the download isn't empty/truncated.
+            if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+                raise RuntimeError("Downloaded file is empty.")
+
+            # Validate the ZIP before accepting it.
+            print("[delivery]   -> validating ZIP...")
+
+            with zipfile.ZipFile(tmp_path, "r") as zf:
+                bad_file = zf.testzip()
+
+            if bad_file is not None:
+                raise RuntimeError(
+                    f"ZIP validation failed; corrupted file: {bad_file}"
+                )
+
+            # Only replace the destination after validation succeeds.
+            os.replace(tmp_path, dest_path)
+
+            print("[delivery]   -> download verified successfully")
+            return
+
+        except Exception as exc:
+            print(
+                f"\n[delivery] Download attempt {attempt} failed: {exc}"
+            )
+
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+
+            if attempt == max_retries:
+                raise RuntimeError(
+                    f"Failed to download valid checkpoint after "
+                    f"{max_retries} attempts: {url}"
+                ) from exc
+
+            wait = min(2 ** attempt, 30)
+            print(f"[delivery] Retrying in {wait} seconds...")
+            time.sleep(wait)
 
 
 def _resolve_checkpoint_dir(lang_dir: str) -> Optional[str]:
