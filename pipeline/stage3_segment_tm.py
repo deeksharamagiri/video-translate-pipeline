@@ -94,20 +94,62 @@ def chunk_segments(asr_segments, source_lang: str, target_lang: str) -> List[Seg
     return chunks
 
 
+def _hard_wrap(text: str, max_chars: int) -> List[str]:
+    """Split text into <=max_chars pieces at word boundaries, falling back
+    to a character-level cut for any single "word" that's still over the
+    cap on its own -- e.g. a run of text with no spaces at all (a known
+    Whisper hallucination failure mode: repeated/garbled tokens transcribed
+    from silence or noise with no normal word breaks). Without the
+    character-level fallback, splitting on " " alone treats such a run as
+    one unsplittable word and lets it through at full length -- confirmed
+    to be exactly what let a several-thousand-char chunk reach TTS synthesis
+    and blow past FastPitch's fixed positional-encoding limit."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return [text]
+    words = text.split(" ")
+    pieces = []
+    current = ""
+    for w in words:
+        while len(w) > max_chars:
+            if current:
+                pieces.append(current)
+                current = ""
+            pieces.append(w[:max_chars])
+            w = w[max_chars:]
+        candidate = f"{current} {w}".strip()
+        if len(candidate) > max_chars and current:
+            pieces.append(current)
+            current = w
+        else:
+            current = candidate
+    if current:
+        pieces.append(current)
+    return pieces
+
+
 def _split_long_text(text, start, end):
-    """Proportionally split a long segment's time span across sentence chunks."""
+    """Proportionally split a long segment's time span across chunks, each
+    capped at SEGMENT_MAX_CHARS. Splits at sentence boundaries first; any
+    resulting piece still over the cap is hard-wrapped at word boundaries so
+    every returned piece is guaranteed <= SEGMENT_MAX_CHARS."""
     import re
     sentences = re.split(r"(?<=[.!?।])\s+", text)
     sentences = [s for s in sentences if s.strip()] or [text]
-    total_len = sum(len(s) for s in sentences)
+
+    pieces_text = []
+    for s in sentences:
+        pieces_text.extend(_hard_wrap(s, SEGMENT_MAX_CHARS))
+
+    total_len = sum(len(p) for p in pieces_text) or 1
     duration = max(end - start, 0.01)
 
     pieces = []
     cursor = start
-    for s in sentences:
-        frac = len(s) / total_len if total_len else 1 / len(sentences)
+    for p in pieces_text:
+        frac = len(p) / total_len
         seg_dur = duration * frac
-        pieces.append((cursor, cursor + seg_dur, s.strip()))
+        pieces.append((cursor, cursor + seg_dur, p.strip()))
         cursor += seg_dur
     return pieces
 

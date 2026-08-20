@@ -10,6 +10,7 @@ const formError = document.getElementById('formError');
 const pipelinePanel = document.getElementById('pipelinePanel');
 const progressBarInner = document.getElementById('progressBarInner');
 const progressMsg = document.getElementById('progressMsg');
+const progressPct = document.getElementById('progressPct');
 const resultsPanel = document.getElementById('resultsPanel');
 const statsRow = document.getElementById('statsRow');
 const downloadsEl = document.getElementById('downloads');
@@ -85,6 +86,7 @@ function pollStatus(jobId) {
       if (data.progress) {
         progressBarInner.style.width = `${data.progress.pct}%`;
         progressMsg.textContent = data.progress.message;
+        progressPct.textContent = `${data.progress.pct}%`;
       }
 
       if (data.error) {

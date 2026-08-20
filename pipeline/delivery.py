@@ -161,6 +161,13 @@ def _resolve_checkpoint_dir(lang_dir: str) -> Optional[str]:
     <lang_dir>/hi/{fastpitch,hifigan}/, confirmed by inspection), so this
     can't just be lang_dir itself -- it's whatever directory turns out to
     be the immediate parent of both subfolders.
+
+    Only returns a directory whose fastpitch/ and hifigan/ subfolders both
+    actually contain best_model.pth -- an interrupted/truncated download can
+    leave the folders present with just their (tiny) config.json, which
+    previously satisfied this check and got cached as "already downloaded"
+    forever, permanently failing synthesis with a missing-file error instead
+    of ever retrying the download.
     """
     fastpitch_dir = _find_checkpoint_subdir(lang_dir, "fastpitch")
     hifigan_dir = _find_checkpoint_subdir(lang_dir, "hifigan")
@@ -168,6 +175,9 @@ def _resolve_checkpoint_dir(lang_dir: str) -> Optional[str]:
         return None
     parent = os.path.dirname(fastpitch_dir)
     if parent != os.path.dirname(hifigan_dir):
+        return None
+    if not (os.path.exists(os.path.join(fastpitch_dir, "best_model.pth"))
+            and os.path.exists(os.path.join(hifigan_dir, "best_model.pth"))):
         return None
     return parent
 
@@ -265,20 +275,66 @@ def _ensure_indic_tts_checkpoint(lang: str) -> str:
     return checkpoint_dir
 
 
-def synthesize_with_indic_tts(text: str, lang: str, out_wav_path: str,
-                               speaker: Optional[str] = None) -> str:
-    """
-    AI4Bharat/Indic-TTS: language-specific FastPitch (acoustic) + HiFi-GAN
-    (vocoder) synthesis, run via subprocess in the isolated .venv-tts (see
-    _get_tts_venv_python). speaker: "male" or "female"; defaults to
-    INDIC_TTS_DEFAULT_SPEAKER (brx has no male speaker upstream).
-    """
-    checkpoint_dir = _ensure_indic_tts_checkpoint(lang)
-    venv_python = _get_tts_venv_python()
-    speaker = speaker or INDIC_TTS_DEFAULT_SPEAKER
-    if lang == "brx" and speaker == "male":
-        speaker = "female"
+# Hard safety cap right at the TTS call boundary -- deliberately independent
+# of Stage 3's own SEGMENT_MAX_CHARS (200). Stage 3 chunking is *supposed*
+# to guarantee every piece of text is short, but a positional-encoding
+# overflow crashing synthesis is expensive to debug from the outside (no
+# indication which segment or why), so this is defense in depth: no matter
+# what text reaches this function -- from Stage 3, a future code path, or an
+# edge case Stage 3's splitter doesn't yet handle -- it physically cannot
+# exceed this length in a single Indic-TTS call. Comfortably under whatever
+# length produces sequences anywhere near FastPitch's fixed 5000-token
+# positional-encoding limit.
+TTS_MAX_CHARS = 300
 
+
+def _split_text_for_tts(text: str, max_chars: int) -> List[str]:
+    """Word-boundary split with a character-level fallback for any single
+    "word" that's still over the cap on its own (e.g. a run of text with no
+    spaces at all) -- guarantees every returned piece is <= max_chars no
+    matter how the text is shaped."""
+    text = text.strip()
+    if len(text) <= max_chars:
+        return [text]
+    words = text.split(" ")
+    pieces = []
+    current = ""
+    for w in words:
+        while len(w) > max_chars:
+            if current:
+                pieces.append(current)
+                current = ""
+            pieces.append(w[:max_chars])
+            w = w[max_chars:]
+        candidate = f"{current} {w}".strip()
+        if len(candidate) > max_chars and current:
+            pieces.append(current)
+            current = w
+        else:
+            current = candidate
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def _concat_wavs(wav_paths: List[str], out_path: str) -> str:
+    """Concatenate same-format WAV files by raw frame data. Used to stitch
+    multiple TTS sub-calls back into the single wav a segment's timeline
+    slot expects, when that segment's text had to be split for length --
+    all sub-pieces come from the same TTS voice/model call so the format
+    (sample rate/channels/sample width) is guaranteed consistent."""
+    with wave.open(wav_paths[0], "rb") as first:
+        params = first.getparams()
+    with wave.open(out_path, "wb") as out:
+        out.setparams(params)
+        for p in wav_paths:
+            with wave.open(p, "rb") as w:
+                out.writeframes(w.readframes(w.getnframes()))
+    return out_path
+
+
+def _run_tts_worker(text: str, checkpoint_dir: str, venv_python: str,
+                     speaker: str, out_wav_path: str) -> None:
     proc = subprocess.run(
         [venv_python, INDIC_TTS_WORKER_SCRIPT,
          "--checkpoint-dir", checkpoint_dir,
@@ -290,6 +346,41 @@ def synthesize_with_indic_tts(text: str, lang: str, out_wav_path: str,
     if proc.returncode != 0:
         raise RuntimeError(
             f"Indic-TTS synthesis failed: {proc.stderr.decode(errors='ignore')}")
+
+
+def synthesize_with_indic_tts(text: str, lang: str, out_wav_path: str,
+                               speaker: Optional[str] = None) -> str:
+    """
+    AI4Bharat/Indic-TTS: language-specific FastPitch (acoustic) + HiFi-GAN
+    (vocoder) synthesis, run via subprocess in the isolated .venv-tts (see
+    _get_tts_venv_python). speaker: "male" or "female"; defaults to
+    INDIC_TTS_DEFAULT_SPEAKER (brx has no male speaker upstream).
+
+    Text longer than TTS_MAX_CHARS is split and synthesized as multiple
+    calls, then stitched into the one output wav this segment's slot
+    expects -- see TTS_MAX_CHARS.
+    """
+    checkpoint_dir = _ensure_indic_tts_checkpoint(lang)
+    venv_python = _get_tts_venv_python()
+    speaker = speaker or INDIC_TTS_DEFAULT_SPEAKER
+    if lang == "brx" and speaker == "male":
+        speaker = "female"
+
+    pieces = _split_text_for_tts(text, TTS_MAX_CHARS)
+
+    if len(pieces) == 1:
+        _run_tts_worker(pieces[0], checkpoint_dir, venv_python, speaker, out_wav_path)
+        return out_wav_path
+
+    piece_wavs = []
+    base, ext = os.path.splitext(out_wav_path)
+    for i, piece in enumerate(pieces):
+        piece_path = f"{base}_p{i}{ext}"
+        _run_tts_worker(piece, checkpoint_dir, venv_python, speaker, piece_path)
+        piece_wavs.append(piece_path)
+    _concat_wavs(piece_wavs, out_wav_path)
+    for p in piece_wavs:
+        os.remove(p)
     return out_wav_path
 
 

@@ -86,16 +86,30 @@ def run_job(input_path: str, source_lang_hint: Optional[str], target_lang: str,
     # ---------------- Translation engine (Indic vs NLLB) ----------------
     engine_name = "Translation Memory (cache only)"
     if misses:
+        total_misses = len(misses)
+
+        def _translate_progress(done: int, total: int):
+            frac = done / total if total else 1.0
+            # Translation occupies the 60-75% band of the overall job.
+            pct = 60 + round(frac * 15)
+            _progress(
+                progress_cb, "translate",
+                f"Translating segment {done} of {total} ({round(frac * 100)}%)...",
+                pct,
+            )
+
         _progress(progress_cb, "translate",
-                   f"Translating {len(misses)} new segment(s)...", 60)
+                   f"Translating segment 0 of {total_misses} (0%)...", 60)
         texts = [s.text for s in misses]
         translated_texts, engine_name = translate.translate_batch(
-            texts, source_lang, target_lang, engine_override
+            texts, source_lang, target_lang, engine_override,
+            progress_cb=_translate_progress,
         )
         for seg, tr in zip(misses, translated_texts):
             seg.translated_text = tr
     else:
-        _progress(progress_cb, "translate", "All segments served from translation memory.", 60)
+        _progress(progress_cb, "translate",
+                   f"All {len(segments)} segment(s) served from translation memory.", 60)
 
     # ---------------- Stage 4 — Subtitle Generation ----------------
     _progress(progress_cb, "stage4", "Generating SRT/VTT subtitle files...", 75)
