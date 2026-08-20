@@ -277,10 +277,23 @@ def run_job(
 
     if misses:
 
+        total_misses = len(misses)
+
+        def _translate_progress(done: int, total: int):
+            frac = done / total if total else 1.0
+            # Translation occupies the 60-75% band of the overall job.
+            pct = 60 + round(frac * 15)
+            _progress(
+                progress_cb,
+                "translate",
+                f"Translating segment {done} of {total} ({round(frac * 100)}%)...",
+                pct,
+            )
+
         _progress(
             progress_cb,
             "translate",
-            f"Translating {len(misses)} new segment(s)...",
+            f"Translating segment 0 of {total_misses} (0%)...",
             60,
         )
 
@@ -297,6 +310,7 @@ def run_job(
             source_lang,
             target_lang,
             engine_override,
+            progress_cb=_translate_progress,
         )
 
         for seg, tr in zip(
@@ -311,7 +325,7 @@ def run_job(
         _progress(
             progress_cb,
             "translate",
-            "All segments served from translation memory.",
+            f"All {len(segments)} segment(s) served from translation memory.",
             60,
         )
 

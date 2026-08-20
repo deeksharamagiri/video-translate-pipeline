@@ -9,7 +9,7 @@ Both branches get glossary injection before/after the model call.
 import json
 import os
 import re
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from config import (
     INDIC_LANGS, INDICTRANS2_MODELS, INDICTRANS2_MODEL_SIZE, NLLB_MODEL,
@@ -225,9 +225,17 @@ def translate_with_nllb(texts: List[str], source_lang: str, target_lang: str) ->
     return results
 
 
+# Sub-batch size for translate_batch's chunking loop. Keeps IndicTrans2's
+# batched model.generate() call (much faster than one-text-at-a-time) while
+# still giving the caller a progress_cb tick every few segments instead of
+# one silent call covering the whole job.
+TRANSLATE_CHUNK_SIZE = 8
+
+
 # --------------------------------------------------------------- entry point
 def translate_batch(texts: List[str], source_lang: str, target_lang: str,
-                     engine_override: str = "auto") -> tuple:
+                     engine_override: str = "auto",
+                     progress_cb: Optional[Callable[[int, int], None]] = None) -> tuple:
     """
     Route to IndicTrans2 or NLLB-200 per the diagram, with glossary
     protection wrapped around either engine.
@@ -239,6 +247,10 @@ def translate_batch(texts: List[str], source_lang: str, target_lang: str,
                        back to the indic-indic checkpoint for pairs outside
                        its three trained directions)
       "nllb"        -> force NLLB-200-distilled-600M regardless of language pair
+
+    progress_cb, if given, is called as progress_cb(done, total) after each
+    sub-batch finishes, so callers can report live "X of Y segments" progress
+    instead of one message that sits still for the whole translation step.
     """
     if not texts:
         return [], "n/a"
@@ -262,10 +274,19 @@ def translate_batch(texts: List[str], source_lang: str, target_lang: str,
         model_name = INDICTRANS2_MODELS[resolved_direction][INDICTRANS2_MODEL_SIZE]
         short_name = model_name.split("/")[-1]
         engine_name = f"IndicTrans2 ({short_name})" + (" (forced)" if engine_override == "indictrans2" else "")
-        raw_outputs = translate_with_indictrans2(protected_texts, source_lang, target_lang, direction)
     else:
         engine_name = "NLLB-200-distilled-600M (forced)" if engine_override == "nllb" else "NLLB-200-distilled-600M"
-        raw_outputs = translate_with_nllb(protected_texts, source_lang, target_lang)
+
+    total = len(protected_texts)
+    raw_outputs = []
+    for start in range(0, total, TRANSLATE_CHUNK_SIZE):
+        chunk = protected_texts[start:start + TRANSLATE_CHUNK_SIZE]
+        if use_indictrans2:
+            raw_outputs.extend(translate_with_indictrans2(chunk, source_lang, target_lang, direction))
+        else:
+            raw_outputs.extend(translate_with_nllb(chunk, source_lang, target_lang))
+        if progress_cb:
+            progress_cb(len(raw_outputs), total)
 
     final_outputs = [
         _restore_glossary_terms(out, rmap)

@@ -233,6 +233,12 @@ main:has(#resultsPanel:not([hidden])) .step[data-step="3"] .step-label { color: 
   font-family: var(--sans); font-size: 20px; font-weight: 700;
   margin: 0 0 20px; display: flex; align-items: center; gap: 12px;
 }
+.progress-pct {
+  margin-left: auto; font-size: 14px; font-weight: 700; color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.1); border-radius: 20px;
+  padding: 4px 12px; letter-spacing: 0.2px;
+  font-variant-numeric: tabular-nums;
+}
 .tag {
   font-size: 16px; color: #fff; background: var(--accent);
   width: 32px; height: 32px; border-radius: 50%;

@@ -865,6 +865,21 @@ def _resolve_checkpoint_dir(
 
         return None
 
+    # An interrupted/truncated download can leave both folders present
+    # with just their (tiny) config.json -- without this check that
+    # satisfies the check above and gets cached as "already downloaded"
+    # forever, permanently failing synthesis instead of ever retrying.
+    if not (
+        os.path.exists(
+            os.path.join(fastpitch_dir, "best_model.pth")
+        )
+        and os.path.exists(
+            os.path.join(hifigan_dir, "best_model.pth")
+        )
+    ):
+
+        return None
+
     return parent
 
 
