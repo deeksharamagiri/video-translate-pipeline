@@ -30,3 +30,9 @@ torchaudio
 # once torch>=2.9 (torchaudio dropped its own I/O backends at that point).
 coqui-tts[codec]
 scipy
+# Number-to-words normalization (synthesize.py converts digits to spoken
+# words per language before TTS) -- was missing from this file, which made
+# every synthesize.py subprocess call crash at import time with
+# ModuleNotFoundError, failing every segment's voiceover with no direct
+# error surfaced (just an aggregate "No segments produced TTS audio.").
+indic_numtowords
