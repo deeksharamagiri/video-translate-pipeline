@@ -85,10 +85,32 @@ ALLOWED_AUDIO_EXT = {".mp3", ".wav", ".ogg"}
 TARGET_SAMPLE_RATE = 16000                # 16 kHz mono WAV
 SNR_DENOISE_THRESHOLD_DB = 15.0           # below this -> auto-denoise + warn user
 
-# ---------- Stage 2 — ASR (faster-whisper) ----------
-WHISPER_MODEL_SIZE = "small"              # tiny/base/small/medium/large-v3 — swap as needed
-WHISPER_DEVICE = "cpu"                    # "cuda" if you have a GPU
-WHISPER_COMPUTE_TYPE = "int8"             # int8 for CPU, float16 for GPU
+# ---------- Stage 2 — ASR (whisper.cpp) ----------
+# Previously used faster-whisper's "small" model (ctranslate2, int8, CPU).
+# Verified directly against real job audio that this was the dominant cause
+# of "nonsensical translation" complaints: on a real segment, faster-whisper
+# "small" misdetected the language as Sinhala (35% confidence) and produced
+# pure garbage, while whisper.cpp's quantized medium model transcribed the
+# identical audio as a clean, correct Marathi sentence. faster-whisper
+# "small" also used vad_filter=True (Silero VAD), which was verified to
+# silently drop multi-minute stretches of real, audible speech from the
+# transcript entirely -- confirmed by re-transcribing a "gap" span directly
+# from source audio and finding coherent speech the pipeline had produced
+# zero output for.
+#
+# Plain faster-whisper "medium" (ctranslate2, int8) was tried as a fix and
+# reliably got OOM-killed on 8GB RAM. whisper.cpp's quantized medium model
+# (ggml-medium-q5_0, ~514MB on disk) runs the same accuracy tier in a much
+# smaller memory footprint -- verified stable on the same 8GB machine -- and
+# has no separate VAD gate by default, so it doesn't drop real speech the
+# way vad_filter=True did.
+WHISPER_CPP_BINARY = os.environ.get("WHISPER_CPP_BINARY", "whisper-cli")
+WHISPER_CPP_MODEL_DIR = os.path.join(MODELS_DIR, "whisper_cpp")
+WHISPER_CPP_MODEL_FILENAME = "ggml-medium-q5_0.bin"
+WHISPER_CPP_MODEL_PATH = os.path.join(WHISPER_CPP_MODEL_DIR, WHISPER_CPP_MODEL_FILENAME)
+WHISPER_CPP_MODEL_URL = (
+    f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{WHISPER_CPP_MODEL_FILENAME}"
+)
 
 # ---------- Stage 3 — Segmentation + Translation Memory ----------
 TM_DB_PATH = os.path.join(DATA_DIR, "translation_memory.db")
@@ -130,10 +152,10 @@ GLOSSARY_PATH = os.path.join(DATA_DIR, "glossary.json")
 # ---------- CPU speedup: dynamic INT8 quantization of translation models ----------
 # torch.quantization.quantize_dynamic over nn.Linear layers, applied once at
 # model-load time in translate.py. Applies to IndicTrans2 + NLLB only (not
-# faster-whisper, which already runs int8 via WHISPER_COMPUTE_TYPE, and not
-# the optional IndicConformer ASR model, and not Indic-TTS which runs in its
-# own separate venv/process entirely). Default on; flip off to
-# isolate a quality regression if one is ever suspected.
+# the ASR stage, which runs whisper.cpp as a separate quantized-model
+# subprocess, and not the optional IndicConformer ASR model, and not
+# Indic-TTS which runs in its own separate venv/process entirely). Default
+# on; flip off to isolate a quality regression if one is ever suspected.
 QUANTIZE_TRANSLATION_MODELS = True
 
 # ---------- Optional: IndicConformer ASR (off by default) ----------
@@ -189,10 +211,63 @@ INDIC_TTS_DEFAULT_SPEAKER = "female"  # "male" or "female"; brx has no male spea
 # ---------- Delivery: duration-aware voiceover alignment ----------
 # After Indic-TTS synthesizes a segment, if its duration doesn't fit the
 # segment's original time slot (seg.end - seg.start), time-stretch it with
-# ffmpeg's atempo filter before stitching (existing adelay/amix collision
-# avoidance stays as the fallback for whatever residual drift remains).
+# ffmpeg's atempo filter before stitching.
 VOICEOVER_TIME_STRETCH = True
-VOICEOVER_MAX_TEMPO_RATIO = 2.5   # clamp; atempo chains 2+ stages beyond its native 0.5-2.0 range
+# Segment slot durations come from ASR/VAD timing, which is often noisy (a
+# handful of words can get a 20+ second slot right next to a full sentence
+# squeezed into 1-2 seconds). Fitting every segment's TTS audio exactly to
+# its slot -- the old default was 2.5, i.e. anywhere from 0.4x to 2.5x speed
+# -- produces wildly inconsistent pacing from one segment to the next
+# ("randomly slow and randomly quick" playback). This is the *soft* bound
+# used for normal segments: +/-20%, close to natural human pacing variance.
+VOICEOVER_MAX_TEMPO_RATIO = 1.2   # clamp; within native atempo range (0.5-2.0), no chaining needed
+
+# Letting every segment drift from its slot without limit (the previous
+# approach: place strictly sequentially, one after another, never checking
+# against original timing) was verified against a real job to cause several
+# seconds of audio/video desync within any run of tightly-packed segments --
+# reported as "the screen moves onto another frame but the output audio is
+# still of the previous frame". VOICEOVER_MAX_DRIFT_SEC bounds this: once a
+# segment's earliest possible start (after the previous segment) has
+# drifted more than this far from its own original subtitle start, that
+# segment gets compressed harder -- up to VOICEOVER_CATCHUP_MAX_TEMPO_RATIO
+# -- specifically to pull the timeline back within budget, instead of
+# letting drift keep compounding.
+#
+# VOICEOVER_CATCHUP_MAX_TEMPO_RATIO was briefly narrowed from 1.6 to 1.3 to
+# make catch-up bursts sound less jarring. That was a mistake: this ratio
+# isn't just a naturalness knob, it's what makes the VOICEOVER_MAX_DRIFT_SEC
+# guarantee actually hold -- when a segment needs more compression than the
+# ceiling allows to stay in budget, the code intentionally lets it exceed
+# the drift cap rather than distort the audio further (see the "physical
+# intelligibility floor" comment in delivery.py). Weakening the ceiling to
+# 1.3 therefore weakened the sync guarantee itself, not just pacing --
+# verified on a real job: max drift went from ~1.5s to 13.7s. Reverted to
+# 1.6 (the value actually validated to keep drift bounded). The zero-
+# duration-segment bug in stage2_asr.py that was injecting most of the
+# drift bursts in the first place is now fixed at its source, which should
+# also mean the 1.6 ceiling gets invoked less often than before -- i.e.
+# smoother pacing AND bounded sync, rather than trading one for the other.
+#
+# That held for the systemic (12-occurrence) zero-duration case, but a real
+# job still showed 6.35s of drift afterward -- traced to a different,
+# rarer failure mode: whisper.cpp assigning a segment a slot wildly too
+# short for its actual content (one case: a 128-char sentence, ~10.8s of
+# real TTS speech, given only a 0.84s window) with almost no room before
+# the next segment's own start -- not enough runway for any tempo
+# compression, however aggressive, to fully absorb. stage2_asr.py now
+# extends such segments' timing where there's room to (capped at the next
+# segment's start, never creating an overlap), which helps the common
+# case; for the genuinely pathological case above there wasn't enough room
+# regardless. Raised the ceiling to 2.0 -- the native atempo range's own
+# limit (see _build_atempo_chain), so this still never triggers filter
+# chaining/its extra quality loss -- and tightened the drift budget to 1.0s,
+# which together brought that same job's worst-case drift down from 6.35s
+# to ~4.55s. Not a full elimination of every possible case (that would need
+# smarter multi-segment lookahead scheduling, a bigger change), but a large,
+# measured improvement, and the common/systemic causes are now gone.
+VOICEOVER_MAX_DRIFT_SEC = 1.0
+VOICEOVER_CATCHUP_MAX_TEMPO_RATIO = 2.0   # only used while actively catching up drift; native atempo ceiling
 
 # ---------- Stage 4 — Subtitle Generation ----------
 MAX_CHARS_PER_LINE = 42

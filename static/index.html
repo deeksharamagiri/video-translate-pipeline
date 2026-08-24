@@ -84,17 +84,18 @@
       </select>
     </label>
 
-    <button id="submitBtn" class="btn-primary" disabled><span class="btn-icon">🚜</span> Run Pipeline</button>
+    <button id="submitBtn" class="btn-primary" disabled>
+      <span class="btn-idle"><span class="btn-icon">🚜</span> Run Pipeline</span>
+      <span class="btn-processing">
+        <span class="btn-processing-top">
+          <span class="spinner" aria-hidden="true"></span>
+          <span class="btn-progress-msg" id="progressMsg">Waiting...</span>
+          <span class="btn-progress-pct" id="progressPct">0%</span>
+        </span>
+        <span class="btn-progress-track"><span class="btn-progress-fill" id="progressBarInner"></span></span>
+      </span>
+    </button>
     <p class="error" id="formError" hidden></p>
-  </section>
-
-  <section class="panel pipeline-panel" id="pipelinePanel" hidden>
-    <h2><span class="tag">🌿</span> Processing <span class="progress-pct" id="progressPct">0%</span></h2>
-    <div class="progress-bar-outer"><div class="progress-bar-inner" id="progressBarInner"></div></div>
-    <div class="progress-status">
-      <span class="spinner" aria-hidden="true"></span>
-      <p class="progress-msg" id="progressMsg">Waiting...</p>
-    </div>
   </section>
 
   <section class="panel results-panel" id="resultsPanel" hidden>

@@ -7,7 +7,6 @@ const dzClear = document.getElementById('dzClear');
 const submitBtn = document.getElementById('submitBtn');
 const formError = document.getElementById('formError');
 
-const pipelinePanel = document.getElementById('pipelinePanel');
 const progressBarInner = document.getElementById('progressBarInner');
 const progressMsg = document.getElementById('progressMsg');
 const progressPct = document.getElementById('progressPct');
@@ -50,7 +49,10 @@ submitBtn.addEventListener('click', async () => {
   if (!selectedFile) return;
   formError.hidden = true;
   submitBtn.disabled = true;
-  submitBtn.innerHTML = '<span class="btn-icon">⏳</span> Uploading...';
+  submitBtn.classList.add('is-processing');
+  progressMsg.textContent = 'Uploading...';
+  progressPct.textContent = '0%';
+  progressBarInner.style.width = '0%';
 
   const fd = new FormData();
   fd.append('file', selectedFile);
@@ -65,15 +67,13 @@ submitBtn.addEventListener('click', async () => {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Upload failed.');
 
-    pipelinePanel.hidden = false;
     resultsPanel.hidden = true;
-    submitBtn.innerHTML = '<span class="btn-icon">🔄</span> Processing...';
     pollStatus(data.job_id);
   } catch (err) {
     formError.textContent = err.message;
     formError.hidden = false;
     submitBtn.disabled = false;
-    submitBtn.innerHTML = '<span class="btn-icon">🚜</span> Run Pipeline';
+    submitBtn.classList.remove('is-processing');
   }
 });
 
@@ -91,23 +91,25 @@ function pollStatus(jobId) {
 
       if (data.error) {
         clearInterval(interval);
-        progressMsg.textContent = `Error: ${data.error}`;
-        progressMsg.style.color = 'var(--red)';
+        formError.textContent = `Error: ${data.error}`;
+        formError.hidden = false;
         submitBtn.disabled = false;
-        submitBtn.textContent = 'Run Pipeline';
+        submitBtn.classList.remove('is-processing');
         return;
       }
 
       if (data.result) {
         clearInterval(interval);
-        pipelinePanel.hidden = true;
         renderResults(jobId, data.result);
         submitBtn.disabled = false;
-        submitBtn.innerHTML = '<span class="btn-icon">🚜</span> Run Pipeline';
+        submitBtn.classList.remove('is-processing');
       }
     } catch (err) {
       clearInterval(interval);
-      progressMsg.textContent = `Connection error: ${err.message}`;
+      formError.textContent = `Connection error: ${err.message}`;
+      formError.hidden = false;
+      submitBtn.disabled = false;
+      submitBtn.classList.remove('is-processing');
     }
   }, 1200);
 }
