@@ -186,7 +186,8 @@ def translate_with_indictrans2(texts: List[str], source_lang: str, target_lang: 
 
     with torch.no_grad():
         generated = model.generate(
-            **inputs, use_cache=True, min_length=0, max_length=256, num_beams=5
+            **inputs, use_cache=True, min_length=0, max_length=256, num_beams=5,
+            no_repeat_ngram_size=3, repetition_penalty=1.3,
         )
     decoded = tokenizer.batch_decode(generated, skip_special_tokens=True)
     return processor.postprocess_batch(decoded, lang=tgt_code)
@@ -219,7 +220,8 @@ def translate_with_nllb(texts: List[str], source_lang: str, target_lang: str) ->
         with torch.no_grad():
             generated = model.generate(
                 **inputs, forced_bos_token_id=forced_bos_token_id,
-                max_length=256, num_beams=5
+                max_length=256, num_beams=5,
+                no_repeat_ngram_size=3, repetition_penalty=1.3,
             )
         results.append(tokenizer.decode(generated[0], skip_special_tokens=True))
     return results

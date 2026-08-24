@@ -30,6 +30,8 @@ from config import (
     INDIC_TTS_DEFAULT_SPEAKER,
     VOICEOVER_TIME_STRETCH,
     VOICEOVER_MAX_TEMPO_RATIO,
+    VOICEOVER_MAX_DRIFT_SEC,
+    VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
 )
 
 from pipeline.stage3_segment_tm import Segment
@@ -490,14 +492,18 @@ def calculate_translation_quality(
 # TTS timing
 # =========================================================
 
+_MIN_VOICEOVER_GAP_SEC = 0.05
+
+
 def _build_atempo_chain(
     ratio: float,
+    max_ratio: float = VOICEOVER_MAX_TEMPO_RATIO,
 ) -> str:
 
     ratio = max(
-        1.0 / VOICEOVER_MAX_TEMPO_RATIO,
+        1.0 / max_ratio,
         min(
-            VOICEOVER_MAX_TEMPO_RATIO,
+            max_ratio,
             ratio,
         ),
     )
@@ -536,6 +542,7 @@ def _time_stretch_to_fit(
     in_wav_path: str,
     out_wav_path: str,
     target_duration: float,
+    max_ratio: float = VOICEOVER_MAX_TEMPO_RATIO,
 ) -> str:
 
     current = _get_wav_duration(
@@ -560,7 +567,8 @@ def _time_stretch_to_fit(
         return in_wav_path
 
     filt = _build_atempo_chain(
-        ratio
+        ratio,
+        max_ratio,
     )
 
     _run([
@@ -1347,6 +1355,8 @@ def build_voiceover_track(
         "warnings": [],
     }
 
+    cursor_end = 0.0
+
     for seg in segments:
 
         text = (
@@ -1455,8 +1465,64 @@ def build_voiceover_track(
                 - seg.start
             )
 
+            placed_start = seg.start
+
             if VOICEOVER_TIME_STRETCH:
 
+                raw_duration = (
+                    _get_wav_duration(
+                        seg_wav
+                    )
+                )
+
+                earliest_start = max(
+                    seg.start,
+                    cursor_end + _MIN_VOICEOVER_GAP_SEC,
+                )
+
+                # Natural, gentle fit to this segment's own slot -- what
+                # we'd use if timing weren't a concern at all.
+                natural_target = min(
+                    raw_duration * VOICEOVER_MAX_TEMPO_RATIO,
+                    max(
+                        raw_duration / VOICEOVER_MAX_TEMPO_RATIO,
+                        slot,
+                    ),
+                )
+
+                # Cap on how long THIS segment's audio may run so it
+                # doesn't add more than VOICEOVER_MAX_DRIFT_SEC of new
+                # desync by the time it ends -- applied to every segment,
+                # not only ones already in backlog, so a single segment
+                # whose translated text is much longer than its slot can't
+                # single-handedly saddle every later segment with an
+                # unbounded backlog the way naive sequential placement did.
+                drift_cap_target = (
+                    (seg.end + VOICEOVER_MAX_DRIFT_SEC)
+                    - earliest_start
+                )
+
+                target_duration = min(
+                    natural_target,
+                    drift_cap_target,
+                )
+
+                # Physical intelligibility floor: never compress past this,
+                # even if that means this one segment still overruns its
+                # drift budget (unavoidable when translated content is
+                # simply much longer than its assigned slot -- the
+                # important part is that this doesn't compound into every
+                # later segment too, which the cap above prevents).
+                target_duration = max(
+                    target_duration,
+                    raw_duration / VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
+                )
+
+                # target_duration is already bounded (by construction above)
+                # to raw_duration * [1/VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
+                # VOICEOVER_MAX_TEMPO_RATIO], so the implied ratio can never
+                # exceed the catch-up ratio -- pass it as the outer safety
+                # bound rather than recomputing a tighter one here.
                 fitted = os.path.join(
                     tts_dir,
                     f"seg_{seg.index:05d}_fit.wav",
@@ -1466,14 +1532,22 @@ def build_voiceover_track(
                     _time_stretch_to_fit(
                         seg_wav,
                         fitted,
-                        slot,
+                        target_duration,
+                        VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
                     )
                 )
+
+                placed_start = earliest_start
 
             duration = (
                 _get_wav_duration(
                     final_wav
                 )
+            )
+
+            cursor_end = (
+                placed_start
+                + duration
             )
 
             alignment_score = (
@@ -1513,7 +1587,7 @@ def build_voiceover_track(
 
             segment_wavs.append(
                 (
-                    seg.start,
+                    placed_start,
                     final_wav,
                     duration,
                 )
@@ -1559,17 +1633,27 @@ def build_voiceover_track(
         for item in segment_wavs
     ]
 
-    durations = [
-        item[2]
-        for item in segment_wavs
-    ]
+    if VOICEOVER_TIME_STRETCH:
 
-    adjusted_starts = (
-        _get_sequential_timeline(
-            starts,
-            durations,
+        # Placement was already resolved per-segment above (drift-bounded
+        # against each segment's original slot), so `starts` already holds
+        # final positions -- re-running plain sequential chaining here
+        # would throw that bounding away.
+        adjusted_starts = starts
+
+    else:
+
+        durations = [
+            item[2]
+            for item in segment_wavs
+        ]
+
+        adjusted_starts = (
+            _get_sequential_timeline(
+                starts,
+                durations,
+            )
         )
-    )
 
     # -----------------------------------------------------
     # FFmpeg mixing
@@ -1621,7 +1705,16 @@ def build_voiceover_track(
         + f"amix=inputs="
         f"{len(mix_labels)}:"
         "duration=longest:"
-        "dropout_transition=0"
+        "dropout_transition=0:"
+        # amix defaults to normalize=1, which divides the WHOLE mixed
+        # output by the input count -- correct for genuinely simultaneous
+        # sources, but wrong here: each segment is adelay-padded into its
+        # own mostly-non-overlapping slot, so normalizing by segment count
+        # (60-120+ per job) silently attenuated the entire voiceover by
+        # 35-40+ dB, audible only at max system volume. Segments only
+        # actually overlap in rare edge cases, where a hard sample-sum
+        # clip is far preferable to uniformly crushing the whole track.
+        "normalize=0"
         "[out]"
     )
 
@@ -1831,7 +1924,8 @@ def mux_voiceover_onto_video(
                 "[orig];"
                 "[orig][1:a]"
                 "amix=inputs=2:"
-                "duration=first"
+                "duration=first:"
+                "normalize=0"  # see build_voiceover_track's amix -- same normalize=1 pitfall
                 "[aout]"
             ),
             "-map",
