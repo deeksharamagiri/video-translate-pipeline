@@ -1149,6 +1149,15 @@ def synthesize_with_indic_tts(
     speaker: Optional[str] = None,
     metadata_path: Optional[str] = None,
 ) -> Dict:
+    """
+    Single-shot synthesis: spawns a fresh TTS worker subprocess, which
+    loads the checkpoint, synthesizes one piece of text, and exits.
+
+    Kept for one-off/manual use. For anything with more than one segment
+    (i.e. build_voiceover_track below), use IndicTTSWorker instead --
+    calling this function per segment means reloading the ~1.5GB
+    FastPitch+HiFiGAN checkpoint pair from disk for every single segment.
+    """
 
     checkpoint_dir = (
         _ensure_indic_tts_checkpoint(
@@ -1250,6 +1259,148 @@ def synthesize_with_indic_tts(
             pass
 
     return metadata
+
+
+class IndicTTSWorker:
+    """
+    Persistent Indic-TTS worker process.
+
+    Spawns tts_worker/synthesize.py in --serve mode ONCE per
+    (lang, speaker), which loads the FastPitch+HiFiGAN checkpoint a
+    single time and then keeps the process alive to synthesize many
+    segments over stdin/stdout. This replaces spawning a fresh
+    subprocess (and reloading the checkpoint) for every segment.
+
+    Usage:
+
+        worker = IndicTTSWorker(checkpoint_dir, lang, speaker,
+                                 venv_python, worker_script)
+        try:
+            for seg in segments:
+                metadata = worker.synthesize(text, seg_wav, metadata_path)
+        finally:
+            worker.close()
+    """
+
+    def __init__(
+        self,
+        checkpoint_dir: str,
+        lang: str,
+        speaker: str,
+        venv_python: str,
+        worker_script: str,
+        startup_timeout_sec: float = 300.0,
+    ):
+        self._proc = subprocess.Popen(
+            [
+                venv_python,
+                worker_script,
+                "--checkpoint-dir",
+                checkpoint_dir,
+                "--lang",
+                lang,
+                "--speaker",
+                speaker,
+                "--serve",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+        # Block until the worker reports it has finished loading the
+        # checkpoint (or dies trying). This is the one place per job we
+        # pay the checkpoint-load cost.
+        ready_line = self._proc.stdout.readline()
+
+        if not ready_line:
+            stderr = self._proc.stderr.read()
+            raise RuntimeError(
+                "Indic-TTS worker exited before becoming ready:\n"
+                + stderr
+            )
+
+        try:
+            ready = json.loads(ready_line)
+        except json.JSONDecodeError:
+            stderr = self._proc.stderr.read()
+            raise RuntimeError(
+                "Indic-TTS worker sent unexpected startup output "
+                f"({ready_line!r}):\n{stderr}"
+            )
+
+        if not ready.get("ready"):
+            stderr = self._proc.stderr.read()
+            raise RuntimeError(
+                "Indic-TTS worker failed to start:\n" + stderr
+            )
+
+    def synthesize(
+        self,
+        text: str,
+        out_wav_path: str,
+        metadata_path: Optional[str] = None,
+        speaker: Optional[str] = None,
+    ) -> Dict:
+
+        if self._proc.poll() is not None:
+            stderr = self._proc.stderr.read()
+            raise RuntimeError(
+                "Indic-TTS worker process is no longer running:\n"
+                + stderr
+            )
+
+        request = {
+            "text": text,
+            "out": out_wav_path,
+        }
+
+        if metadata_path:
+            request["metadata_out"] = metadata_path
+
+        if speaker:
+            request["speaker"] = speaker
+
+        self._proc.stdin.write(
+            json.dumps(request, ensure_ascii=False) + "\n"
+        )
+        self._proc.stdin.flush()
+
+        line = self._proc.stdout.readline()
+
+        if not line:
+            stderr = self._proc.stderr.read()
+            raise RuntimeError(
+                "Indic-TTS worker died mid-synthesis:\n" + stderr
+            )
+
+        result = json.loads(line)
+
+        if not result.get("ok"):
+            raise RuntimeError(
+                "Indic-TTS synthesis failed: "
+                + str(result.get("error"))
+            )
+
+        return result
+
+    def close(self):
+
+        try:
+            if self._proc.poll() is None:
+                self._proc.stdin.write(
+                    json.dumps({"cmd": "shutdown"}) + "\n"
+                )
+                self._proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+
+        try:
+            self._proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self._proc.terminate()
 
 
 # =========================================================
@@ -1355,268 +1506,291 @@ def build_voiceover_track(
         "warnings": [],
     }
 
+    # -----------------------------------------------------
+    # Resolve the checkpoint + venv ONCE, and start a single
+    # persistent TTS worker process for the whole job instead
+    # of spawning (and reloading the checkpoint for) one
+    # subprocess per segment.
+    # -----------------------------------------------------
+
+    checkpoint_dir = _ensure_indic_tts_checkpoint(target_lang)
+    venv_python = _get_tts_venv_python()
+
+    effective_speaker = speaker or INDIC_TTS_DEFAULT_SPEAKER
+
+    if target_lang == "brx" and effective_speaker == "male":
+        effective_speaker = "female"
+
+    worker = IndicTTSWorker(
+        checkpoint_dir,
+        target_lang,
+        effective_speaker,
+        venv_python,
+        INDIC_TTS_WORKER_SCRIPT,
+    )
+
     cursor_end = 0.0
 
-    for seg in segments:
+    try:
+        for seg in segments:
 
-        text = (
-            seg.translated_text
-            if seg.translated_text is not None
-            else seg.text
-        )
-
-        if not text.strip():
-
-            quality[
-                "warnings"
-            ].append(
-                f"Segment {seg.index}: "
-                "empty translation skipped."
+            text = (
+                seg.translated_text
+                if seg.translated_text is not None
+                else seg.text
             )
 
-            quality[
-                "segment_details"
-            ].append({
-                "segment": seg.index,
-                "source_text": seg.text,
-                "translated_text": text,
-                "numeric_count": 0,
-                "status": "SKIPPED",
-            })
-
-            continue
-
-        seg_wav = os.path.join(
-            tts_dir,
-            f"seg_{seg.index:05d}.wav",
-        )
-
-        metadata_path = os.path.join(
-            tts_dir,
-            f"seg_{seg.index:05d}.json",
-        )
-
-        numeric_count = _numeric_count(
-            text
-        )
-
-        if numeric_count > 0:
-
-            quality[
-                "numeric_segments"
-            ] += 1
-
-        try:
-
-            metadata = (
-                synthesize_with_indic_tts(
-                    text,
-                    target_lang,
-                    seg_wav,
-                    speaker,
-                    metadata_path,
-                )
-            )
-
-            quality[
-                "tts_success_segments"
-            ] += 1
-
-            numeric_expressions = (
-                metadata.get(
-                    "numeric_expressions",
-                    [],
-                )
-            )
-
-            for item in numeric_expressions:
+            if not text.strip():
 
                 quality[
-                    "numeric_expressions"
+                    "warnings"
+                ].append(
+                    f"Segment {seg.index}: "
+                    "empty translation skipped."
+                )
+
+                quality[
+                    "segment_details"
+                ].append({
+                    "segment": seg.index,
+                    "source_text": seg.text,
+                    "translated_text": text,
+                    "numeric_count": 0,
+                    "status": "SKIPPED",
+                })
+
+                continue
+
+            seg_wav = os.path.join(
+                tts_dir,
+                f"seg_{seg.index:05d}.wav",
+            )
+
+            metadata_path = os.path.join(
+                tts_dir,
+                f"seg_{seg.index:05d}.json",
+            )
+
+            numeric_count = _numeric_count(
+                text
+            )
+
+            if numeric_count > 0:
+
+                quality[
+                    "numeric_segments"
                 ] += 1
 
-                if item.get(
-                    "success"
-                ):
+            try:
 
-                    quality[
-                        "numeric_normalization_success"
-                    ] += 1
-
-                else:
-
-                    quality[
-                        "numeric_normalization_failures"
-                    ] += 1
-
-                if (
-                    item.get("type")
-                    == "decimal"
-                ):
-
-                    quality[
-                        "decimal_expressions"
-                    ] += 1
-
-            final_wav = seg_wav
-
-            slot = (
-                seg.end
-                - seg.start
-            )
-
-            placed_start = seg.start
-
-            if VOICEOVER_TIME_STRETCH:
-
-                raw_duration = (
-                    _get_wav_duration(
-                        seg_wav
-                    )
+                metadata = worker.synthesize(
+                    text,
+                    seg_wav,
+                    metadata_path,
                 )
 
-                earliest_start = max(
-                    seg.start,
-                    cursor_end + _MIN_VOICEOVER_GAP_SEC,
-                )
+                quality[
+                    "tts_success_segments"
+                ] += 1
 
-                # Natural, gentle fit to this segment's own slot -- what
-                # we'd use if timing weren't a concern at all.
-                natural_target = min(
-                    raw_duration * VOICEOVER_MAX_TEMPO_RATIO,
-                    max(
-                        raw_duration / VOICEOVER_MAX_TEMPO_RATIO,
-                        slot,
-                    ),
-                )
-
-                # Cap on how long THIS segment's audio may run so it
-                # doesn't add more than VOICEOVER_MAX_DRIFT_SEC of new
-                # desync by the time it ends -- applied to every segment,
-                # not only ones already in backlog, so a single segment
-                # whose translated text is much longer than its slot can't
-                # single-handedly saddle every later segment with an
-                # unbounded backlog the way naive sequential placement did.
-                drift_cap_target = (
-                    (seg.end + VOICEOVER_MAX_DRIFT_SEC)
-                    - earliest_start
-                )
-
-                target_duration = min(
-                    natural_target,
-                    drift_cap_target,
-                )
-
-                # Physical intelligibility floor: never compress past this,
-                # even if that means this one segment still overruns its
-                # drift budget (unavoidable when translated content is
-                # simply much longer than its assigned slot -- the
-                # important part is that this doesn't compound into every
-                # later segment too, which the cap above prevents).
-                target_duration = max(
-                    target_duration,
-                    raw_duration / VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
-                )
-
-                # target_duration is already bounded (by construction above)
-                # to raw_duration * [1/VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
-                # VOICEOVER_MAX_TEMPO_RATIO], so the implied ratio can never
-                # exceed the catch-up ratio -- pass it as the outer safety
-                # bound rather than recomputing a tighter one here.
-                fitted = os.path.join(
-                    tts_dir,
-                    f"seg_{seg.index:05d}_fit.wav",
-                )
-
-                final_wav = (
-                    _time_stretch_to_fit(
-                        seg_wav,
-                        fitted,
-                        target_duration,
-                        VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
-                    )
-                )
-
-                placed_start = earliest_start
-
-            duration = (
-                _get_wav_duration(
-                    final_wav
-                )
-            )
-
-            cursor_end = (
-                placed_start
-                + duration
-            )
-
-            alignment_score = (
-                _calculate_alignment_score(
-                    slot,
-                    duration,
-                )
-            )
-
-            quality[
-                "alignment_scores"
-            ].append(
-                alignment_score
-            )
-
-            quality[
-                "segment_details"
-            ].append({
-                "segment": seg.index,
-                "start": seg.start,
-                "end": seg.end,
-                "source_text": seg.text,
-                "translated_text": text,
-                "tts_duration": duration,
-                "slot_duration": slot,
-                "alignment_score":
-                    alignment_score,
-                "numeric_count":
-                    numeric_count,
-                "numeric_normalization":
+                numeric_expressions = (
                     metadata.get(
                         "numeric_expressions",
                         [],
-                    ),
-                "status": "OK",
-            })
-
-            segment_wavs.append(
-                (
-                    placed_start,
-                    final_wav,
-                    duration,
+                    )
                 )
-            )
 
-        except Exception as exc:
+                for item in numeric_expressions:
 
-            quality[
-                "tts_failed_segments"
-            ] += 1
+                    quality[
+                        "numeric_expressions"
+                    ] += 1
 
-            quality[
-                "warnings"
-            ].append(
-                f"Segment {seg.index}: "
-                f"TTS failed — {exc}"
-            )
+                    if item.get(
+                        "success"
+                    ):
 
-            quality[
-                "segment_details"
-            ].append({
-                "segment": seg.index,
-                "source_text": seg.text,
-                "translated_text": text,
-                "numeric_count":
-                    numeric_count,
-                "status": "FAILED",
-                "error": str(exc),
-            })
+                        quality[
+                            "numeric_normalization_success"
+                        ] += 1
+
+                    else:
+
+                        quality[
+                            "numeric_normalization_failures"
+                        ] += 1
+
+                    if (
+                        item.get("type")
+                        == "decimal"
+                    ):
+
+                        quality[
+                            "decimal_expressions"
+                        ] += 1
+
+                final_wav = seg_wav
+
+                slot = (
+                    seg.end
+                    - seg.start
+                )
+
+                placed_start = seg.start
+
+                if VOICEOVER_TIME_STRETCH:
+
+                    raw_duration = (
+                        _get_wav_duration(
+                            seg_wav
+                        )
+                    )
+
+                    earliest_start = max(
+                        seg.start,
+                        cursor_end + _MIN_VOICEOVER_GAP_SEC,
+                    )
+
+                    # Natural, gentle fit to this segment's own slot -- what
+                    # we'd use if timing weren't a concern at all.
+                    natural_target = min(
+                        raw_duration * VOICEOVER_MAX_TEMPO_RATIO,
+                        max(
+                            raw_duration / VOICEOVER_MAX_TEMPO_RATIO,
+                            slot,
+                        ),
+                    )
+
+                    # Cap on how long THIS segment's audio may run so it
+                    # doesn't add more than VOICEOVER_MAX_DRIFT_SEC of new
+                    # desync by the time it ends -- applied to every segment,
+                    # not only ones already in backlog, so a single segment
+                    # whose translated text is much longer than its slot can't
+                    # single-handedly saddle every later segment with an
+                    # unbounded backlog the way naive sequential placement did.
+                    drift_cap_target = (
+                        (seg.end + VOICEOVER_MAX_DRIFT_SEC)
+                        - earliest_start
+                    )
+
+                    target_duration = min(
+                        natural_target,
+                        drift_cap_target,
+                    )
+
+                    # Physical intelligibility floor: never compress past this,
+                    # even if that means this one segment still overruns its
+                    # drift budget (unavoidable when translated content is
+                    # simply much longer than its assigned slot -- the
+                    # important part is that this doesn't compound into every
+                    # later segment too, which the cap above prevents).
+                    target_duration = max(
+                        target_duration,
+                        raw_duration / VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
+                    )
+
+                    # target_duration is already bounded (by construction above)
+                    # to raw_duration * [1/VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
+                    # VOICEOVER_MAX_TEMPO_RATIO], so the implied ratio can never
+                    # exceed the catch-up ratio -- pass it as the outer safety
+                    # bound rather than recomputing a tighter one here.
+                    fitted = os.path.join(
+                        tts_dir,
+                        f"seg_{seg.index:05d}_fit.wav",
+                    )
+
+                    final_wav = (
+                        _time_stretch_to_fit(
+                            seg_wav,
+                            fitted,
+                            target_duration,
+                            VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
+                        )
+                    )
+
+                    placed_start = earliest_start
+
+                duration = (
+                    _get_wav_duration(
+                        final_wav
+                    )
+                )
+
+                cursor_end = (
+                    placed_start
+                    + duration
+                )
+
+                alignment_score = (
+                    _calculate_alignment_score(
+                        slot,
+                        duration,
+                    )
+                )
+
+                quality[
+                    "alignment_scores"
+                ].append(
+                    alignment_score
+                )
+
+                quality[
+                    "segment_details"
+                ].append({
+                    "segment": seg.index,
+                    "start": seg.start,
+                    "end": seg.end,
+                    "source_text": seg.text,
+                    "translated_text": text,
+                    "tts_duration": duration,
+                    "slot_duration": slot,
+                    "alignment_score":
+                        alignment_score,
+                    "numeric_count":
+                        numeric_count,
+                    "numeric_normalization":
+                        metadata.get(
+                            "numeric_expressions",
+                            [],
+                        ),
+                    "status": "OK",
+                })
+
+                segment_wavs.append(
+                    (
+                        placed_start,
+                        final_wav,
+                        duration,
+                    )
+                )
+
+            except Exception as exc:
+
+                quality[
+                    "tts_failed_segments"
+                ] += 1
+
+                quality[
+                    "warnings"
+                ].append(
+                    f"Segment {seg.index}: "
+                    f"TTS failed — {exc}"
+                )
+
+                quality[
+                    "segment_details"
+                ].append({
+                    "segment": seg.index,
+                    "source_text": seg.text,
+                    "translated_text": text,
+                    "numeric_count":
+                        numeric_count,
+                    "status": "FAILED",
+                    "error": str(exc),
+                })
+
+    finally:
+        worker.close()
 
     if not segment_wavs:
 

@@ -22,11 +22,22 @@ Automatic Voiceover Quality
 Stage 5 archive
 
 Every generated job receives a quality report.
+
+TIMING INSTRUMENTATION
+-----------------------
+Every major stage is wrapped in a `_Stage(...)` context manager, which
+records wall-clock seconds for that stage into a per-job `timings` dict.
+This exists purely to answer "why did an N-minute video take M minutes" --
+it doesn't change any pipeline behavior. The full breakdown is printed to
+stdout when the job finishes and is also returned as
+`outputs["stats"]["timing_seconds"]` for programmatic inspection.
 """
 
 import os
 import shutil
+import time
 import uuid
+from contextlib import contextmanager
 from typing import Callable, Optional
 
 from config import (
@@ -67,6 +78,62 @@ def _progress(
         })
 
 
+@contextmanager
+def _Stage(timings: dict, name: str):
+    """
+    Records wall-clock seconds spent inside the `with` block under
+    timings[name]. If the same name is used more than once in a job
+    (shouldn't normally happen), later calls add to the existing total
+    rather than overwriting it.
+    """
+
+    start = time.perf_counter()
+
+    try:
+        yield
+
+    finally:
+        elapsed = time.perf_counter() - start
+        timings[name] = timings.get(name, 0.0) + elapsed
+
+
+def _print_timing_summary(job_id: str, timings: dict, total_elapsed: float):
+
+    print(f"\n[orchestrator] Job {job_id} timing breakdown:")
+
+    # Sort slowest-first so the dominant cost is immediately visible.
+    for name, seconds in sorted(
+        timings.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    ):
+
+        pct_of_total = (
+            (seconds / total_elapsed) * 100.0
+            if total_elapsed > 0
+            else 0.0
+        )
+
+        print(
+            f"[orchestrator]   {name:<24} "
+            f"{seconds:8.2f}s  ({pct_of_total:5.1f}%)"
+        )
+
+    accounted = sum(timings.values())
+    unaccounted = total_elapsed - accounted
+
+    print(
+        f"[orchestrator]   {'(unaccounted)':<24} "
+        f"{unaccounted:8.2f}s  "
+        f"({(unaccounted / total_elapsed * 100.0) if total_elapsed > 0 else 0.0:5.1f}%)"
+    )
+
+    print(
+        f"[orchestrator]   {'TOTAL':<24} "
+        f"{total_elapsed:8.2f}s\n"
+    )
+
+
 def run_job(
     input_path: str,
     source_lang_hint: Optional[str],
@@ -78,6 +145,9 @@ def run_job(
     asr_engine: str = "whisper",
     tts_speaker: Optional[str] = None,
 ) -> dict:
+
+    job_start = time.perf_counter()
+    timings: dict = {}
 
     job_id = uuid.uuid4().hex[:12]
 
@@ -145,13 +215,15 @@ def run_job(
         5,
     )
 
-    pre = (
-        stage1_preprocess.run_stage1(
-            local_input,
-            work_dir,
-            input_kind,
+    with _Stage(timings, "stage1_preprocess"):
+
+        pre = (
+            stage1_preprocess.run_stage1(
+                local_input,
+                work_dir,
+                input_kind,
+            )
         )
-    )
 
     # =====================================================
     # Stage 2
@@ -166,37 +238,41 @@ def run_job(
             25,
         )
 
-        (
-            asr_segments,
-            detected_lang,
-        ) = _segments_from_srt(
-            pre.subtitle_srt_path
-        )
+        with _Stage(timings, "stage2_asr"):
+
+            (
+                asr_segments,
+                detected_lang,
+            ) = _segments_from_srt(
+                pre.subtitle_srt_path
+            )
 
     else:
 
         _progress(
             progress_cb,
             "stage2",
-            "Running speech recognition (faster-whisper)...",
+            "Running speech recognition (whisper.cpp)...",
             20,
         )
 
-        asr_result = (
-            stage2_asr.run_stage2(
-                pre.audio_wav_path,
-                language_hint=source_lang_hint,
+        with _Stage(timings, "stage2_asr"):
+
+            asr_result = (
+                stage2_asr.run_stage2(
+                    pre.audio_wav_path,
+                    language_hint=source_lang_hint,
+                )
             )
-        )
 
-        asr_segments = (
-            asr_result.segments
-        )
+            asr_segments = (
+                asr_result.segments
+            )
 
-        detected_lang = (
-            source_lang_hint
-            or asr_result.detected_language
-        )
+            detected_lang = (
+                source_lang_hint
+                or asr_result.detected_language
+            )
 
     source_lang = _normalize_lang(
         source_lang_hint
@@ -216,14 +292,16 @@ def run_job(
             30,
         )
 
-        asr_segments = (
-            stage2_asr
-            .refine_segments_with_indic_conformer(
-                asr_segments,
-                pre.audio_wav_path,
-                source_lang,
+        with _Stage(timings, "asr_refine_indic_conformer"):
+
+            asr_segments = (
+                stage2_asr
+                .refine_segments_with_indic_conformer(
+                    asr_segments,
+                    pre.audio_wav_path,
+                    source_lang,
+                )
             )
-        )
 
     # =====================================================
     # Stage 3
@@ -236,36 +314,38 @@ def run_job(
         45,
     )
 
-    glossary_version = (
-        translate.glossary_version_tag()
-    )
+    with _Stage(timings, "stage3_segment_tm"):
 
-    model_version = (
-        translate.model_version_tag(
-            source_lang,
-            target_lang,
-            engine_override,
+        glossary_version = (
+            translate.glossary_version_tag()
         )
-    )
 
-    segments = (
-        stage3_segment_tm.chunk_segments(
-            asr_segments,
-            source_lang,
-            target_lang,
+        model_version = (
+            translate.model_version_tag(
+                source_lang,
+                target_lang,
+                engine_override,
+            )
         )
-    )
 
-    misses = (
-        stage3_segment_tm
-        .apply_translation_memory(
-            segments,
-            source_lang,
-            target_lang,
-            glossary_version,
-            model_version,
+        segments = (
+            stage3_segment_tm.chunk_segments(
+                asr_segments,
+                source_lang,
+                target_lang,
+            )
         )
-    )
+
+        misses = (
+            stage3_segment_tm
+            .apply_translation_memory(
+                segments,
+                source_lang,
+                target_lang,
+                glossary_version,
+                model_version,
+            )
+        )
 
     # =====================================================
     # Translation
@@ -275,59 +355,61 @@ def run_job(
         "Translation Memory (cache only)"
     )
 
-    if misses:
+    with _Stage(timings, "translation"):
 
-        total_misses = len(misses)
+        if misses:
 
-        def _translate_progress(done: int, total: int):
-            frac = done / total if total else 1.0
-            # Translation occupies the 60-75% band of the overall job.
-            pct = 60 + round(frac * 15)
+            total_misses = len(misses)
+
+            def _translate_progress(done: int, total: int):
+                frac = done / total if total else 1.0
+                # Translation occupies the 60-75% band of the overall job.
+                pct = 60 + round(frac * 15)
+                _progress(
+                    progress_cb,
+                    "translate",
+                    f"Translating segment {done} of {total} ({round(frac * 100)}%)...",
+                    pct,
+                )
+
             _progress(
                 progress_cb,
                 "translate",
-                f"Translating segment {done} of {total} ({round(frac * 100)}%)...",
-                pct,
+                f"Translating segment 0 of {total_misses} (0%)...",
+                60,
             )
 
-        _progress(
-            progress_cb,
-            "translate",
-            f"Translating segment 0 of {total_misses} (0%)...",
-            60,
-        )
+            texts = [
+                s.text
+                for s in misses
+            ]
 
-        texts = [
-            s.text
-            for s in misses
-        ]
+            (
+                translated_texts,
+                engine_name,
+            ) = translate.translate_batch(
+                texts,
+                source_lang,
+                target_lang,
+                engine_override,
+                progress_cb=_translate_progress,
+            )
 
-        (
-            translated_texts,
-            engine_name,
-        ) = translate.translate_batch(
-            texts,
-            source_lang,
-            target_lang,
-            engine_override,
-            progress_cb=_translate_progress,
-        )
+            for seg, tr in zip(
+                misses,
+                translated_texts,
+            ):
 
-        for seg, tr in zip(
-            misses,
-            translated_texts,
-        ):
+                seg.translated_text = tr
 
-            seg.translated_text = tr
+        else:
 
-    else:
-
-        _progress(
-            progress_cb,
-            "translate",
-            f"All {len(segments)} segment(s) served from translation memory.",
-            60,
-        )
+            _progress(
+                progress_cb,
+                "translate",
+                f"All {len(segments)} segment(s) served from translation memory.",
+                60,
+            )
 
     # =====================================================
     # Automatic Translation Quality
@@ -340,11 +422,13 @@ def run_job(
         68,
     )
 
-    translation_quality = (
-        delivery.calculate_translation_quality(
-            segments
+    with _Stage(timings, "translation_qc"):
+
+        translation_quality = (
+            delivery.calculate_translation_quality(
+                segments
+            )
         )
-    )
 
     # =====================================================
     # Stage 4
@@ -367,15 +451,17 @@ def run_job(
         f"{job_id}_subtitles.vtt",
     )
 
-    stage4_subtitle.generate_srt(
-        segments,
-        srt_path,
-    )
+    with _Stage(timings, "stage4_subtitle"):
 
-    stage4_subtitle.generate_vtt(
-        segments,
-        vtt_path,
-    )
+        stage4_subtitle.generate_srt(
+            segments,
+            srt_path,
+        )
+
+        stage4_subtitle.generate_vtt(
+            segments,
+            vtt_path,
+        )
 
     # =====================================================
     # Quality information
@@ -524,15 +610,17 @@ def run_job(
                 92,
             )
 
-            (
-                voiceover_wav,
-                voiceover_quality,
-            ) = delivery.build_voiceover_track(
-                segments,
-                target_lang,
-                work_dir,
-                speaker=tts_speaker,
-            )
+            with _Stage(timings, "voiceover_tts"):
+
+                (
+                    voiceover_wav,
+                    voiceover_quality,
+                ) = delivery.build_voiceover_track(
+                    segments,
+                    target_lang,
+                    work_dir,
+                    speaker=tts_speaker,
+                )
 
             # Preserve the translation metrics that were
             # calculated before voiceover generation.
@@ -577,11 +665,13 @@ def run_job(
                 f"{job_id}_voiceover.mp4",
             )
 
-            delivery.mux_voiceover_onto_video(
-                local_input,
-                voiceover_wav,
-                voiceover_path,
-            )
+            with _Stage(timings, "voiceover_mux"):
+
+                delivery.mux_voiceover_onto_video(
+                    local_input,
+                    voiceover_wav,
+                    voiceover_path,
+                )
 
             outputs_voiceover = (
                 voiceover_path
@@ -623,11 +713,13 @@ def run_job(
             or local_input
         )
 
-        delivery.burn_in_subtitles(
-            source_video,
-            srt_path,
-            burned_path,
-        )
+        with _Stage(timings, "burn_in_subtitles"):
+
+            delivery.burn_in_subtitles(
+                source_video,
+                srt_path,
+                burned_path,
+            )
 
     # =====================================================
     # Outputs
@@ -671,16 +763,18 @@ def run_job(
         85,
     )
 
-    archive_stats = (
-        stage5_archive.archive_job(
-            job_id,
-            segments,
-            source_lang,
-            target_lang,
-            glossary_version,
-            model_version,
+    with _Stage(timings, "stage5_archive"):
+
+        archive_stats = (
+            stage5_archive.archive_job(
+                job_id,
+                segments,
+                source_lang,
+                target_lang,
+                glossary_version,
+                model_version,
+            )
         )
-    )
 
     # =====================================================
     # Job report
@@ -691,16 +785,18 @@ def run_job(
         f"{job_id}_job_report.docx",
     )
 
-    report.generate_job_report(
-        job_id,
-        segments,
-        source_lang,
-        target_lang,
-        engine_name,
-        pre.to_dict(),
-        docx_path,
-        quality_info=quality_info,
-    )
+    with _Stage(timings, "job_report_docx"):
+
+        report.generate_job_report(
+            job_id,
+            segments,
+            source_lang,
+            target_lang,
+            engine_name,
+            pre.to_dict(),
+            docx_path,
+            quality_info=quality_info,
+        )
 
     outputs[
         "job_report_docx"
@@ -715,6 +811,14 @@ def run_job(
         "done",
         "Done — ready for USB transfer / offline playback.",
         100,
+    )
+
+    total_elapsed = time.perf_counter() - job_start
+
+    _print_timing_summary(
+        job_id,
+        timings,
+        total_elapsed,
     )
 
     outputs["stats"] = {
@@ -743,6 +847,11 @@ def run_job(
 
         "quality":
             quality_info,
+
+        "timing_seconds": {
+            **timings,
+            "total": total_elapsed,
+        },
     }
 
     return outputs

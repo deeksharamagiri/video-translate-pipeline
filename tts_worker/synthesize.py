@@ -12,6 +12,20 @@ Responsibilities:
 
 The original subtitle/translation text is NEVER modified.
 Only the text sent to TTS is normalized.
+
+Two modes:
+
+  --serve       Persistent mode. Loads the FastPitch + HiFi-GAN checkpoint
+                ONCE, then reads one JSON request per line from stdin and
+                writes one JSON response per line to stdout until it
+                receives {"cmd": "shutdown"} or stdin closes. This is what
+                the pipeline should use for any job with more than one
+                segment -- loading a ~1.5GB checkpoint pair per segment was
+                previously the dominant cost of voiceover generation.
+
+  (default)     Single-shot mode, unchanged from before: loads the
+                checkpoint, synthesizes --text once, exits. Kept around for
+                manual testing of a single segment from the command line.
 """
 
 import argparse
@@ -241,51 +255,9 @@ def normalize_numbers_for_tts(text: str, lang: str):
     return normalized, metadata
 
 
-def main():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--checkpoint-dir",
-        required=True,
-        help="Directory containing fastpitch/ and hifigan/",
-    )
-
-    parser.add_argument(
-        "--text",
-        required=True,
-    )
-
-    parser.add_argument(
-        "--lang",
-        required=True,
-        help="Target language code, e.g. hin, tel, mar",
-    )
-
-    parser.add_argument(
-        "--speaker",
-        default="female",
-        choices=["male", "female"],
-    )
-
-    parser.add_argument(
-        "--out",
-        required=True,
-    )
-
-    parser.add_argument(
-        "--metadata-out",
-        default=None,
-        help="Optional JSON file containing TTS normalization metadata.",
-    )
-
-    args = parser.parse_args()
-
-    fastpitch_dir = Path(args.checkpoint_dir) / "fastpitch"
-    hifigan_dir = Path(args.checkpoint_dir) / "hifigan"
-
-    # ---------------------------------------------------------
-    # Validate checkpoint layout before initializing TTS.
-    # ---------------------------------------------------------
+def _validate_checkpoint_layout(checkpoint_dir: str):
+    fastpitch_dir = Path(checkpoint_dir) / "fastpitch"
+    hifigan_dir = Path(checkpoint_dir) / "hifigan"
 
     required_files = [
         fastpitch_dir / "best_model.pth",
@@ -307,26 +279,20 @@ def main():
             + "\n".join(missing)
         )
 
-    # ---------------------------------------------------------
-    # Number normalization
-    # ---------------------------------------------------------
+    return fastpitch_dir, hifigan_dir
 
-    tts_text, number_metadata = normalize_numbers_for_tts(
-        args.text,
-        args.lang,
-    )
 
-    print(
-        f"[tts] Input: {args.text!r} "
-        f"-> normalized: {tts_text!r}",
-        file=sys.stderr,
-    )
+def build_synthesizer(checkpoint_dir: str) -> Synthesizer:
+    """
+    Load the FastPitch + HiFi-GAN checkpoint pair and construct a
+    Synthesizer. This is the expensive part (disk I/O + model init) --
+    callers should do this ONCE and reuse the returned object across many
+    synthesize_one() calls rather than rebuilding it per segment.
+    """
 
-    # ---------------------------------------------------------
-    # Initialize Indic-TTS
-    # ---------------------------------------------------------
+    fastpitch_dir, hifigan_dir = _validate_checkpoint_layout(checkpoint_dir)
 
-    synth = Synthesizer(
+    return Synthesizer(
         tts_checkpoint=str(
             fastpitch_dir / "best_model.pth"
         ),
@@ -348,13 +314,35 @@ def main():
         use_cuda=False,
     )
 
-    # ---------------------------------------------------------
-    # Synthesis
-    # ---------------------------------------------------------
+
+def synthesize_one(
+    synth: Synthesizer,
+    text: str,
+    lang: str,
+    speaker: str,
+    out_path: str,
+    metadata_path: str = None,
+) -> dict:
+    """
+    Synthesize a single piece of text with an already-loaded Synthesizer.
+    Returns the same metadata shape the old single-shot main() wrote out,
+    so callers (delivery.py) don't need to change how they read the result.
+    """
+
+    tts_text, number_metadata = normalize_numbers_for_tts(
+        text,
+        lang,
+    )
+
+    print(
+        f"[tts] Input: {text!r} "
+        f"-> normalized: {tts_text!r}",
+        file=sys.stderr,
+    )
 
     wav = synth.tts(
         tts_text,
-        speaker_name=args.speaker,
+        speaker_name=speaker,
     )
 
     wav = np.asarray(
@@ -379,18 +367,14 @@ def main():
     )
 
     scipy_wav_write(
-        args.out,
+        out_path,
         sample_rate,
         pcm16,
     )
 
-    # ---------------------------------------------------------
-    # Metadata for quality report
-    # ---------------------------------------------------------
-
     metadata = {
         **number_metadata,
-        "output_wav": str(args.out),
+        "output_wav": str(out_path),
         "sample_rate": sample_rate,
         "sample_count": int(len(pcm16)),
         "duration_seconds": (
@@ -398,12 +382,12 @@ def main():
             if sample_rate
             else 0.0
         ),
-        "speaker": args.speaker,
+        "speaker": speaker,
         "success": True,
     }
 
-    if args.metadata_out:
-        metadata_path = Path(args.metadata_out)
+    if metadata_path:
+        metadata_path = Path(metadata_path)
         metadata_path.parent.mkdir(
             parents=True,
             exist_ok=True,
@@ -420,6 +404,144 @@ def main():
                 ensure_ascii=False,
                 indent=2,
             )
+
+    return metadata
+
+
+def serve(checkpoint_dir: str, lang: str, default_speaker: str):
+    """
+    Persistent worker loop. Loads the checkpoint once, then services one
+    synthesis request per line of stdin until told to shut down.
+
+    Request  (one JSON object per line on stdin):
+        {"text": "...", "out": "/path/seg.wav",
+         "metadata_out": "/path/seg.json",   # optional
+         "speaker": "female"}                # optional, defaults to default_speaker
+        {"cmd": "shutdown"}                  # tells the loop to exit
+
+    Response (one JSON object per line on stdout):
+        {"ready": true}                                  # emitted once, at startup
+        {"ok": true, ...same fields as synthesize_one...} # per successful request
+        {"ok": false, "error": "..."}                     # per failed request
+    """
+
+    synth = build_synthesizer(checkpoint_dir)
+
+    # Emitted only after the slow checkpoint load finishes, so the parent
+    # process knows exactly when it's safe to start sending segments.
+    print(json.dumps({"ready": True}), flush=True)
+
+    for line in sys.stdin:
+        line = line.strip()
+
+        if not line:
+            continue
+
+        try:
+            req = json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(json.dumps({"ok": False, "error": f"bad request JSON: {exc}"}), flush=True)
+            continue
+
+        if req.get("cmd") == "shutdown":
+            break
+
+        try:
+            speaker = req.get("speaker") or default_speaker
+
+            metadata = synthesize_one(
+                synth,
+                req["text"],
+                lang,
+                speaker,
+                req["out"],
+                req.get("metadata_out"),
+            )
+
+            print(json.dumps({"ok": True, **metadata}, ensure_ascii=False), flush=True)
+
+        except Exception as exc:
+            print(
+                f"[tts] serve() request failed: {exc}",
+                file=sys.stderr,
+            )
+            print(json.dumps({"ok": False, "error": str(exc)}), flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--checkpoint-dir",
+        required=True,
+        help="Directory containing fastpitch/ and hifigan/",
+    )
+
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help=(
+            "Persistent mode: load the checkpoint once and service JSON "
+            "requests from stdin until shutdown. Use this for any job with "
+            "more than one segment."
+        ),
+    )
+
+    parser.add_argument(
+        "--text",
+        required=False,
+        help="Required in single-shot mode (i.e. when --serve is not set).",
+    )
+
+    parser.add_argument(
+        "--lang",
+        required=True,
+        help="Target language code, e.g. hin, tel, mar",
+    )
+
+    parser.add_argument(
+        "--speaker",
+        default="female",
+        choices=["male", "female"],
+    )
+
+    parser.add_argument(
+        "--out",
+        required=False,
+        help="Required in single-shot mode (i.e. when --serve is not set).",
+    )
+
+    parser.add_argument(
+        "--metadata-out",
+        default=None,
+        help="Optional JSON file containing TTS normalization metadata.",
+    )
+
+    args = parser.parse_args()
+
+    if args.serve:
+        serve(args.checkpoint_dir, args.lang, args.speaker)
+        return
+
+    if not args.text or not args.out:
+        parser.error("--text and --out are required unless --serve is set")
+
+    # ---------------------------------------------------------
+    # Single-shot mode (unchanged behavior from before, just
+    # reorganized to share build_synthesizer()/synthesize_one()
+    # with --serve mode).
+    # ---------------------------------------------------------
+
+    synth = build_synthesizer(args.checkpoint_dir)
+
+    synthesize_one(
+        synth,
+        args.text,
+        args.lang,
+        args.speaker,
+        args.out,
+        args.metadata_out,
+    )
 
 
 if __name__ == "__main__":

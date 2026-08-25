@@ -207,24 +207,31 @@ def _get_nllb_model():
 
 
 def translate_with_nllb(texts: List[str], source_lang: str, target_lang: str) -> List[str]:
+    """
+    Batched NLLB translation. Previously this ran one text through
+    tokenizer/model.generate() at a time in a Python loop even though the
+    model was already loaded once -- a single padded batch of the whole
+    chunk is meaningfully faster on CPU than N separate generate() calls,
+    the same way translate_with_indictrans2 already batches its chunk.
+    """
     import torch
     model, tokenizer = _get_nllb_model()
     src_code = NLLB_LANG_CODE_MAP.get(source_lang, "eng_Latn")
     tgt_code = NLLB_LANG_CODE_MAP.get(target_lang, "eng_Latn")
 
     tokenizer.src_lang = src_code
-    results = []
-    for text in texts:
-        inputs = tokenizer(text, return_tensors="pt", truncation=True)
-        forced_bos_token_id = tokenizer.convert_tokens_to_ids(tgt_code)
-        with torch.no_grad():
-            generated = model.generate(
-                **inputs, forced_bos_token_id=forced_bos_token_id,
-                max_length=256, num_beams=5,
-                no_repeat_ngram_size=3, repetition_penalty=1.3,
-            )
-        results.append(tokenizer.decode(generated[0], skip_special_tokens=True))
-    return results
+    forced_bos_token_id = tokenizer.convert_tokens_to_ids(tgt_code)
+
+    inputs = tokenizer(texts, return_tensors="pt", truncation=True, padding=True)
+
+    with torch.no_grad():
+        generated = model.generate(
+            **inputs, forced_bos_token_id=forced_bos_token_id,
+            max_length=256, num_beams=5,
+            no_repeat_ngram_size=3, repetition_penalty=1.3,
+        )
+
+    return tokenizer.batch_decode(generated, skip_special_tokens=True)
 
 
 # Sub-batch size for translate_batch's chunking loop. Keeps IndicTrans2's
