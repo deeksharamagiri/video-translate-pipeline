@@ -7,6 +7,15 @@ Indic-TTS voice, ffmpeg -- is baked into the image at build time. Building
 the image still needs internet (to download those weights once); running
 the built image does not.
 
+The image also forces `HF_HUB_OFFLINE=1`/`TRANSFORMERS_OFFLINE=1` at
+runtime (see Dockerfile). This isn't just belt-and-suspenders: verified
+directly that without it, loading a *cached* model still makes
+`huggingface_hub` try to reach huggingface.co first to check for updates
+-- fine with internet, but on a machine with genuinely no route out, that
+attempt hangs rather than failing fast, which would otherwise make every
+job stall on first translation/TTS use instead of running immediately
+from the baked-in cache.
+
 Current scope, chosen to keep the image and build time reasonable:
 
 - **Target machine**: x86_64 (Intel/AMD) Linux or Windows/Mac with Docker.
@@ -150,3 +159,6 @@ Then rebuild and re-save/transfer per steps 1-2.
 - **Voiceover jobs fail inside the container** -- check
   `jobs/pipeline.log` (mounted to the host via the `jobs` volume) for the
   actual traceback from the `.venv-tts` subprocess.
+- **A job seems to hang on first translation/TTS use** -- confirm
+  `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE` weren't unset (e.g. by a custom
+  `docker run -e` override) -- see the offline-mode note above.

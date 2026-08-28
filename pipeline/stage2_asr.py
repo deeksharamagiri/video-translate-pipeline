@@ -8,8 +8,8 @@ Pipeline:
 Features:
     - Uses whisper.cpp through subprocess
     - Supports confirmed language hints such as "mr"
-    - Uses Apple Metal when available
-    - Optimised decoding for Apple Silicon
+    - Uses GPU acceleration when the whisper.cpp binary was built with it
+      (e.g. Metal on macOS); CPU-only otherwise -- see WHISPER_NO_GPU
     - Optional VAD
     - JSON + full JSON output
     - Per-token confidence calculation
@@ -21,12 +21,10 @@ The project intentionally uses whisper.cpp rather than faster-whisper
 because whisper.cpp's quantized models are substantially easier to run
 within the available memory constraints.
 
-Tested target environment:
-
-    macOS
-    Apple Silicon M4
-    whisper.cpp 1.9.2
-    ggml-medium-q5_0.bin
+whisper.cpp 1.9.2, ggml-medium-q5_0.bin. Verified working on both macOS
+(Apple Silicon, Metal-accelerated) for local dev and Debian-based Linux
+(CPU-only build, no GPU passthrough) via the Docker image -- see
+DOCKER.md.
 """
 
 import json
@@ -67,13 +65,13 @@ _model_ensured = False
 # Configuration
 # ============================================================
 
-# Apple Silicon / M4 optimisation.
+# Thread count for whisper.cpp's CPU-side work (always used; on a build
+# with GPU acceleration compiled in, e.g. Metal, the neural-network work
+# itself mostly runs on the GPU instead, but the Docker image's build is
+# CPU-only -- see WHISPER_NO_GPU below and DOCKER.md).
 #
-# whisper.cpp performs the neural-network work primarily through
-# Metal, while some CPU-side work uses these threads.
-#
-# 8 is a good starting point for an M4 laptop. This can be
-# overridden through the environment without modifying code:
+# 8 is a reasonable default for a machine with around that many cores.
+# This can be overridden through the environment without modifying code:
 #
 #     WHISPER_THREADS=6
 #
@@ -407,7 +405,7 @@ def _ensure_whispercpp_model() -> str:
         raise RuntimeError(
             f"whisper.cpp binary "
             f"'{WHISPER_CPP_BINARY}' not found on PATH. "
-            "Install it with `brew install whisper-cpp` "
+            "Build/install whisper.cpp (e.g. https://github.com/ggml-org/whisper.cpp) "
             "or set WHISPER_CPP_BINARY to its full path."
         )
 
@@ -594,14 +592,11 @@ def _build_whisper_command(
     """
     Build the whisper.cpp command.
 
-    Optimised for:
-
-        Apple M4
-        Metal
-        medium-q5_0
-        Marathi / Indic speech
-
-    The exact options are compatible with whisper.cpp 1.9.2.
+    Tuned for medium-q5_0 on Marathi / Indic speech; the exact options are
+    compatible with whisper.cpp 1.9.2. GPU usage (e.g. Metal) depends
+    entirely on whether the whisper-cli binary on this machine was built
+    with it -- the Docker image's build has none compiled in, so it's
+    always CPU-only there regardless of these flags.
     """
 
     cmd = [
@@ -621,7 +616,7 @@ def _build_whisper_command(
         language_hint or "auto",
 
         # ----------------------------------------------------
-        # Apple Silicon / computation
+        # Threading / compute
         # ----------------------------------------------------
 
         "-t",
