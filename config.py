@@ -312,5 +312,11 @@ BURN_IN_ENCODE_PRESET = os.environ.get("BURN_IN_ENCODE_PRESET", "veryfast")
 ARCHIVE_DB_PATH = os.path.join(DATA_DIR, "translation_memory.db")  # same DB, different tables
 
 # ---------- Server ----------
-HOST = "127.0.0.1"
-PORT = 5000
+# Defaults to loopback-only, matching HANDOVER.md's "no auth layer, don't
+# expose this" stance for a normal local install. Override via env var --
+# needed inside Docker specifically: 127.0.0.1 *inside* a container is the
+# container's own loopback, unreachable from the host even with `-p`
+# published, so the container image sets HOST=0.0.0.0 explicitly (see
+# Dockerfile) rather than changing this default for everyone.
+HOST = os.environ.get("HOST", "127.0.0.1")
+PORT = int(os.environ.get("PORT", "5000"))
