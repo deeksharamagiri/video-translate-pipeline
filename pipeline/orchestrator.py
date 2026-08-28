@@ -334,6 +334,21 @@ def _run_job(
         or detected_lang
     )
 
+    if not asr_segments:
+
+        raise JobError(
+            "No usable speech was transcribed from this file "
+            f"(auto-detected source language: {detected_lang or 'unknown'}). "
+            "A common cause: whisper.cpp misdetected the source language, "
+            "so real speech gets decoded through the wrong language's "
+            "model -- this degrades into repeated-token hallucination over "
+            "a long clip, which the hallucination filter then correctly "
+            "drops, leaving nothing. Other causes: the audio may be mostly "
+            "silent, non-speech (music/noise), or too quiet. Try again "
+            "with the source language set explicitly instead of "
+            "auto-detect if you know it."
+        )
+
     # =====================================================
     # Optional IndicConformer refinement
     # =====================================================
