@@ -56,6 +56,9 @@ from pipeline import (
     report,
     delivery,
 )
+from pipeline.logging_setup import get_logger
+
+log = get_logger("orchestrator")
 
 
 class JobError(Exception):
@@ -145,9 +148,12 @@ def run_job(
     asr_engine: str = "whisper",
     tts_speaker: Optional[str] = None,
 ) -> dict:
-
-    job_start = time.perf_counter()
-    timings: dict = {}
+    """
+    Runs one end-to-end job. On any failure, partial output under
+    jobs/<job_id>/ is rolled back (deleted) rather than left half-written,
+    and the failure is logged (console + jobs/pipeline.log) with a full
+    traceback so it can be diagnosed after the fact.
+    """
 
     job_id = uuid.uuid4().hex[:12]
 
@@ -155,6 +161,55 @@ def run_job(
         JOBS_DIR,
         job_id,
     )
+
+    log.info(
+        f"Job {job_id} starting "
+        f"(target_lang={target_lang}, engine={engine_override}, "
+        f"burned_in={want_burned_in}, voiceover={want_voiceover})"
+    )
+
+    try:
+        result = _run_job(
+            job_id,
+            job_dir,
+            input_path,
+            source_lang_hint,
+            target_lang,
+            want_burned_in,
+            want_voiceover,
+            progress_cb,
+            engine_override,
+            asr_engine,
+            tts_speaker,
+        )
+
+    except Exception:
+        log.exception(
+            f"Job {job_id} failed -- rolling back partial output at {job_dir}"
+        )
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise
+
+    log.info(f"Job {job_id} finished ok")
+    return result
+
+
+def _run_job(
+    job_id: str,
+    job_dir: str,
+    input_path: str,
+    source_lang_hint: Optional[str],
+    target_lang: str,
+    want_burned_in: bool,
+    want_voiceover: bool,
+    progress_cb: Optional[Callable] = None,
+    engine_override: str = "auto",
+    asr_engine: str = "whisper",
+    tts_speaker: Optional[str] = None,
+) -> dict:
+
+    job_start = time.perf_counter()
+    timings: dict = {}
 
     work_dir = os.path.join(
         job_dir,

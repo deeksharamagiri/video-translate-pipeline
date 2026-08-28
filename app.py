@@ -10,7 +10,6 @@ Routes:
 """
 import os
 import threading
-import traceback
 import uuid
 
 from flask import Flask, jsonify, request, send_file
@@ -23,6 +22,9 @@ from config import (
 )
 from pipeline.orchestrator import run_job, JobError
 from pipeline.stage5_archive import get_archive_stats
+from pipeline.logging_setup import get_logger
+
+log = get_logger("app")
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = max(MAX_VIDEO_SIZE_MB, MAX_AUDIO_SIZE_MB) * 1024 * 1024
@@ -95,6 +97,8 @@ def upload():
         JOBS[job_id] = {"progress": {"stage": "queued", "message": "Queued...", "pct": 0},
                          "result": None, "error": None}
 
+    log.info(f"Upload accepted: {filename} ({ext}) -> queued job {job_id}")
+
     def _progress_cb(update):
         with JOBS_LOCK:
             JOBS[job_id]["progress"] = update
@@ -111,7 +115,7 @@ def upload():
             with JOBS_LOCK:
                 JOBS[job_id]["result"] = result
         except (JobError, Exception) as e:
-            traceback.print_exc()
+            log.exception(f"Job {job_id} (upload {filename}) failed")
             with JOBS_LOCK:
                 JOBS[job_id]["error"] = str(e)
         finally:
