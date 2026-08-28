@@ -1,0 +1,18 @@
+# Local dev environments -- rebuilt fresh inside the image.
+.venv/
+.venv-tts/
+
+# Local model/job/data state -- the image does its own prefetch during
+# build (see docker/prefetch_models.py) so it's reproducible on any build
+# host, not dependent on whatever happens to be cached locally right now.
+models/
+jobs/
+data/*.db
+uploads_tmp/
+
+__pycache__/
+*.pyc
+.pytest_cache/
+
+.git/
+.gitignore

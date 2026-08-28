@@ -32,6 +32,7 @@ from config import (
     VOICEOVER_MAX_TEMPO_RATIO,
     VOICEOVER_MAX_DRIFT_SEC,
     VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
+    BURN_IN_ENCODE_PRESET,
 )
 
 from pipeline.stage3_segment_tm import Segment
@@ -75,6 +76,8 @@ def burn_in_subtitles(
         video_path,
         "-vf",
         f"subtitles='{escaped_srt}'",
+        "-preset",
+        BURN_IN_ENCODE_PRESET,
         "-c:a",
         "copy",
         out_mp4_path,

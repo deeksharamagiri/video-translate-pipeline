@@ -158,6 +158,31 @@ GLOSSARY_PATH = os.path.join(DATA_DIR, "glossary.json")
 # on; flip off to isolate a quality regression if one is ever suspected.
 QUANTIZE_TRANSLATION_MODELS = True
 
+# ---------- CPU speedup: translation decoding width ----------
+# generate()'s num_beams for both IndicTrans2 and NLLB. Same trade-off
+# already made for whisper.cpp in stage2_asr.py ("greedy decoding gives a
+# much better speed/quality trade-off" for offline field use) -- applied
+# here too. Measured directly on this machine (CPU, real cached NLLB
+# checkpoint, 8-segment batch of representative field-style sentences):
+#
+#     num_beams=5 (previous default): 23.1s
+#     num_beams=1 (greedy):            7.8s   -- ~3x faster, identical output
+#
+# Override per-run without touching code if a specific job's quality looks
+# worse and you want to compare against wider beam search:
+#
+#     TRANSLATION_NUM_BEAMS=5 python app.py
+#
+# Included in model_version_tag() below so the translation-memory cache
+# key changes when this changes -- a cached translation made at one beam
+# width is never silently served as if made at another.
+TRANSLATION_NUM_BEAMS = int(
+    os.environ.get(
+        "TRANSLATION_NUM_BEAMS",
+        "1",
+    )
+)
+
 # ---------- Optional: IndicConformer ASR (off by default) ----------
 # MIT licensed, not gated. Whole-buffer transcription only -- no built-in
 # segmentation/timestamps -- so it is used as an optional per-segment TEXT
@@ -274,9 +299,24 @@ MAX_CHARS_PER_LINE = 42
 MAX_LINES_PER_SUBTITLE = 2
 MIN_GAP_BETWEEN_SUBTITLES_SEC = 0.08
 
+# ---------- CPU speedup: burned-in video re-encode ----------
+# burn_in_subtitles() (delivery.py) has to re-encode video (subtitle
+# burn-in can't be a stream copy) -- ffmpeg's libx264 default preset is
+# "medium". Measured on this machine: "veryfast" cut encode time by ~35%
+# for a comparable output size/bitrate, with no visible quality difference
+# at default CRF. Only affects the burned-in-subtitles output; voiceover
+# muxing already uses "-c:v copy" (no re-encode) and is unaffected.
+BURN_IN_ENCODE_PRESET = os.environ.get("BURN_IN_ENCODE_PRESET", "veryfast")
+
 # ---------- Stage 5 — Archive & Reuse ----------
 ARCHIVE_DB_PATH = os.path.join(DATA_DIR, "translation_memory.db")  # same DB, different tables
 
 # ---------- Server ----------
-HOST = "127.0.0.1"
-PORT = 5000
+# Defaults to loopback-only, matching HANDOVER.md's "no auth layer, don't
+# expose this" stance for a normal local install. Override via env var --
+# needed inside Docker specifically: 127.0.0.1 *inside* a container is the
+# container's own loopback, unreachable from the host even with `-p`
+# published, so the container image sets HOST=0.0.0.0 explicitly (see
+# Dockerfile) rather than changing this default for everyone.
+HOST = os.environ.get("HOST", "127.0.0.1")
+PORT = int(os.environ.get("PORT", "5000"))

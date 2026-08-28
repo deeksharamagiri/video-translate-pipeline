@@ -1,0 +1,24 @@
+services:
+  field-translator:
+    image: field-translator:latest
+    build:
+      context: .
+      # HF_TOKEN must be exported in the shell running `docker compose
+      # build` -- see DOCKER.md. Not a plain build ARG on purpose: those
+      # persist in image history/layers, which is fine for image content
+      # but not for a token.
+      secrets:
+        - hf_token
+    ports:
+      - "5000:5000"
+    volumes:
+      # Job output + translation-memory cache persist across container
+      # restarts/upgrades instead of living only inside the container
+      # filesystem.
+      - ./jobs:/app/jobs
+      - ./data:/app/data
+    restart: unless-stopped
+
+secrets:
+  hf_token:
+    environment: HF_TOKEN

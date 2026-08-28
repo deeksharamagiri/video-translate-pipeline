@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Test-only dependency. Not needed to run the app, only to run tests/.
+pytest>=7.4
