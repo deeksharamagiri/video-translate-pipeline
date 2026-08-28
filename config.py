@@ -35,40 +35,26 @@ except Exception as _e:  # pragma: no cover - defensive; real ffmpeg on PATH sti
 # underlying SRT/VTT text is correct (verified by direct rendering test;
 # fixed upstream in libass 0.17+).
 #
-# If a newer ffmpeg (built against libass 0.17+) is findable, prefer it for
-# ALL ffmpeg/ffprobe calls (audio processing + subtitle burn-in) instead of
-# the bundled one. Override with the FFMPEG_BINARY / FFPROBE_BINARY env
-# vars if yours lives somewhere else. On macOS: `brew install ffmpeg-full`
-# -- the default Homebrew `ffmpeg` formula excludes libass entirely.
+# Set FFMPEG_BINARY / FFPROBE_BINARY to a build with libass 0.17+ to fix
+# this. The Docker image (see Dockerfile) sets these to the distro's
+# packaged ffmpeg -- verified directly that Debian bookworm's ffmpeg links
+# libass 0.17.1. Left unset, this falls back to whatever "ffmpeg"/"ffprobe"
+# resolve to on PATH (the static-ffmpeg-provisioned binary, if nothing
+# better is on PATH already).
 # ---------------------------------------------------------------------------
-_BETTER_FFMPEG_CANDIDATES = [
-    "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",   # Homebrew, Apple Silicon
-    "/usr/local/opt/ffmpeg-full/bin/ffmpeg",      # Homebrew, Intel Mac
-]
-_BETTER_FFPROBE_CANDIDATES = [
-    "/opt/homebrew/opt/ffmpeg-full/bin/ffprobe",
-    "/usr/local/opt/ffmpeg-full/bin/ffprobe",
-]
 
 
-def _resolve_ffmpeg_binary(env_var: str, candidates, fallback: str) -> str:
-    override = os.environ.get(env_var)
-    if override:
-        return override
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return fallback
+def _resolve_ffmpeg_binary(env_var: str, fallback: str) -> str:
+    return os.environ.get(env_var) or fallback
 
 
-FFMPEG_BINARY = _resolve_ffmpeg_binary("FFMPEG_BINARY", _BETTER_FFMPEG_CANDIDATES, "ffmpeg")
-FFPROBE_BINARY = _resolve_ffmpeg_binary("FFPROBE_BINARY", _BETTER_FFPROBE_CANDIDATES, "ffprobe")
+FFMPEG_BINARY = _resolve_ffmpeg_binary("FFMPEG_BINARY", "ffmpeg")
+FFPROBE_BINARY = _resolve_ffmpeg_binary("FFPROBE_BINARY", "ffprobe")
 if FFMPEG_BINARY == "ffmpeg":
     print("[config] Using the auto-provisioned static-ffmpeg binary -- its bundled "
           "libass (0.15.2) mis-renders complex scripts (Devanagari/Thai/Arabic) in "
-          "burned-in subtitles (matras may be misplaced). Install a newer ffmpeg "
-          "with libass 0.17+ (macOS: `brew install ffmpeg-full`) to fix this "
-          "automatically, or set FFMPEG_BINARY to its path.")
+          "burned-in subtitles (matras may be misplaced). Install an ffmpeg build "
+          "with libass 0.17+ and set FFMPEG_BINARY/FFPROBE_BINARY to it to fix this.")
 else:
     print(f"[config] Using ffmpeg with fixed libass shaping for subtitles: {FFMPEG_BINARY}")
 
