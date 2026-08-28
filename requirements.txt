@@ -9,7 +9,8 @@ static-ffmpeg==2.5
 ffmpeg-python==0.2.0
 
 # Stage 2 - ASR
-faster-whisper==1.0.3
+# whisper.cpp does the actual transcription, as a separate `whisper-cli`
+# binary invoked via subprocess (not a pip package -- see README "Setup").
 
 # Stage 3/4 - Translation + subtitles
 # (sqlite3 is stdlib, no install needed)
