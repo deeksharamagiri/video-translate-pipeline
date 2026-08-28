@@ -13,7 +13,7 @@ from typing import Callable, List, Optional
 
 from config import (
     INDIC_LANGS, INDICTRANS2_MODELS, INDICTRANS2_MODEL_SIZE, NLLB_MODEL,
-    GLOSSARY_PATH, QUANTIZE_TRANSLATION_MODELS,
+    GLOSSARY_PATH, QUANTIZE_TRANSLATION_MODELS, TRANSLATION_NUM_BEAMS,
 )
 
 _indictrans_cache = {}      # model_name -> {"model":, "tokenizer":}
@@ -186,7 +186,8 @@ def translate_with_indictrans2(texts: List[str], source_lang: str, target_lang: 
 
     with torch.no_grad():
         generated = model.generate(
-            **inputs, use_cache=True, min_length=0, max_length=256, num_beams=5,
+            **inputs, use_cache=True, min_length=0, max_length=256,
+            num_beams=TRANSLATION_NUM_BEAMS,
             no_repeat_ngram_size=3, repetition_penalty=1.3,
         )
     decoded = tokenizer.batch_decode(generated, skip_special_tokens=True)
@@ -227,7 +228,7 @@ def translate_with_nllb(texts: List[str], source_lang: str, target_lang: str) ->
     with torch.no_grad():
         generated = model.generate(
             **inputs, forced_bos_token_id=forced_bos_token_id,
-            max_length=256, num_beams=5,
+            max_length=256, num_beams=TRANSLATION_NUM_BEAMS,
             no_repeat_ngram_size=3, repetition_penalty=1.3,
         )
 
@@ -306,12 +307,16 @@ def translate_batch(texts: List[str], source_lang: str, target_lang: str,
 
 def model_version_tag(source_lang: str, target_lang: str, engine_override: str = "auto") -> str:
     quant_suffix = "-int8dyn" if QUANTIZE_TRANSLATION_MODELS else ""
+    # Included so the TM cache key changes when TRANSLATION_NUM_BEAMS
+    # changes -- a translation made at one beam width is never silently
+    # served from cache as if made at another.
+    beam_suffix = f"-beam{TRANSLATION_NUM_BEAMS}"
     if engine_override == "nllb":
-        return f"nllb-200-distilled-600M-forced{quant_suffix}"
+        return f"nllb-200-distilled-600M-forced{quant_suffix}{beam_suffix}"
     direction = indictrans2_direction(source_lang, target_lang)
     if engine_override == "indictrans2" or (engine_override == "auto" and direction is not None):
         resolved = direction or "indic_indic"
         short_name = INDICTRANS2_MODELS[resolved][INDICTRANS2_MODEL_SIZE].split("/")[-1]
         forced = "-forced" if engine_override == "indictrans2" else ""
-        return f"{short_name}{forced}{quant_suffix}"
-    return f"nllb-200-distilled-600M{quant_suffix}"
+        return f"{short_name}{forced}{quant_suffix}{beam_suffix}"
+    return f"nllb-200-distilled-600M{quant_suffix}{beam_suffix}"

@@ -212,6 +212,24 @@ WHISPER_ENABLE_VAD = os.environ.get(
 }
 
 
+# Force whisper.cpp onto CPU only (disables Apple Metal).
+#
+# Useful for isolating how much of a run's time is GPU-bound, e.g.
+# to A/B against a normal (Metal) run on the same clip:
+#
+#     WHISPER_NO_GPU=1 python app.py
+#
+# Off by default -- Metal is used automatically when available.
+WHISPER_NO_GPU = os.environ.get(
+    "WHISPER_NO_GPU",
+    "0",
+).lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
+
 # ============================================================
 # Data classes
 # ============================================================
@@ -648,6 +666,13 @@ def _build_whisper_command(
 
     if WHISPER_FLASH_ATTENTION:
         cmd.append("-fa")
+
+    # --------------------------------------------------------
+    # CPU-only (disable Metal), for A/B timing tests.
+    # --------------------------------------------------------
+
+    if WHISPER_NO_GPU:
+        cmd.append("-ng")
 
     # --------------------------------------------------------
     # Suppress non-speech tokens
