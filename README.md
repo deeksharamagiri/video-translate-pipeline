@@ -4,16 +4,21 @@
 |---|---|
 | Video/Audio input + limits | `config.py` + `app.py` upload validation |
 | Stage 1 — Pre-Processing (FFmpeg) | `pipeline/stage1_preprocess.py` |
-| Subtitle-found / Stage 2 — ASR (faster-whisper) | `pipeline/stage1_preprocess.py` + `pipeline/stage2_asr.py` |
+| Subtitle-found / Stage 2 — ASR (whisper.cpp) | `pipeline/stage1_preprocess.py` + `pipeline/stage2_asr.py` |
 | Stage 3 — Segmentation + TM Check (SQLite) | `pipeline/stage3_segment_tm.py` |
 | IndicTrans2 / NLLB-200 routing | `pipeline/translate.py` |
 | Stage 4 — Subtitle Generation | `pipeline/stage4_subtitle.py` |
 | SRT + VTT + Job Report (DOCX) | `pipeline/report.py` |
-| Burned-in MP4 / Voiceover MP4 (Piper + FFmpeg) | `pipeline/delivery.py` |
+| Burned-in MP4 / Voiceover MP4 (Indic-TTS + FFmpeg) | `pipeline/delivery.py`, `tts_worker/` |
 | Stage 5 — Archive & Reuse | `pipeline/stage5_archive.py` |
 | Output folder → USB / offline playback | `jobs/<job_id>/output/` |
 | Everything wired together | `pipeline/orchestrator.py` |
+| Job-level logging (console + file) | `pipeline/logging_setup.py` → `jobs/pipeline.log` |
 | Web UI + upload + progress + downloads | `app.py`, `static/` |
+
+See [`HANDOVER.md`](HANDOVER.md) for ownership/runbook/support details,
+[`DEMO.md`](DEMO.md) for a timed walkthrough script, and
+[`DOCKER.md`](DOCKER.md) to package this for a different, offline machine.
 
 ---
 
@@ -26,18 +31,34 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-That's it — no shell script, no manual ffmpeg install, no manual model
-downloads. Everything else happens automatically the first time it's needed:
+That's it for subtitle-only jobs — no manual ffmpeg install, no manual
+model downloads. Everything else happens automatically the first time it's
+needed:
 
 - **FFmpeg/FFprobe** — provisioned automatically by the `static-ffmpeg`
   package the first time `config.py` is imported (i.e. the first time you
   run the app). No `apt install` / `brew install` required.
-- **faster-whisper, NLLB-200-distilled-600M** — downloaded automatically the
-  first time a job actually needs ASR or non-Indic translation.
-- **Piper TTS voices** — downloaded automatically the first time you request
-  a voiceover MP4 for a given language.
+- **whisper.cpp (`ggml-medium-q5_0.bin`), NLLB-200-distilled-600M** —
+  downloaded automatically the first time a job actually needs ASR or
+  non-Indic translation. `whisper.cpp` itself (the `whisper-cli` binary)
+  must already be on `PATH`, or point `WHISPER_CPP_BINARY` at it — it is
+  not pip-installable.
 - **IndicTrans2** — downloaded automatically the first time a job needs an
   Indic↔Indic translation (e.g. Hindi→Marathi) — **with one caveat below.**
+
+**Voiceover (dubbed MP4) needs one extra one-time step**, because Indic-TTS
+requires a newer `transformers` than IndicTrans2/NLLB are pinned to, so it
+runs in its own virtualenv:
+
+```bash
+python3 -m venv .venv-tts
+.venv-tts/bin/pip install -r tts_worker/requirements.txt
+```
+
+Skip this if you only need subtitles (SRT/VTT) — voiceover generation will
+just be unavailable until it's set up, everything else works fine.
+Indic-TTS checkpoints (~1.5GB per language) then download automatically the
+first time that language is used for a voiceover.
 
 ## Run it
 
@@ -95,12 +116,30 @@ stack trace).
 5. **Low-SNR audio**: try a noisy/quiet recording — the Job Report should
    show a denoise warning.
 
-## Adding more Piper voices / languages
+## Adding more Indic-TTS voices / languages
 
-Add a language code → filename in `config.PIPER_VOICE_MAP`, and the matching
-download URLs (`.onnx` + `.onnx.json`) in `config.PIPER_VOICE_URLS` (browse
-available voices at https://huggingface.co/rhasspy/piper-voices). It'll
-auto-download the first time that language is used for a voiceover.
+Voiceover uses AI4Bharat/Indic-TTS. Supported languages are declared in
+`config.INDIC_TTS_LANG_ZIP_MAP` (internal 3-letter code → release asset
+code); add an entry there for any additional language AI4Bharat publishes
+a checkpoint for (browse releases at
+https://github.com/AI4Bharat/Indic-TTS/releases). The checkpoint downloads
+automatically the first time that language is used for a voiceover.
+Requesting voiceover for a target language *not* in that map doesn't fail
+the job — it's skipped with a warning in the Job Report, and subtitles are
+still produced normally.
+
+## Running tests
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt   # one-time, adds pytest
+.venv/bin/python -m pytest
+```
+
+Tests cover pure logic that doesn't need model downloads: translation
+engine routing (IndicTrans2 vs NLLB), translation-memory hashing/cache
+hit-miss behavior, numeric-preservation quality scoring, SRT parsing, and
+the job-failure rollback path. They don't exercise ASR/translation/TTS
+model inference itself — that's covered by the manual checklist above.
 
 ## Adding glossary terms
 
@@ -108,10 +147,48 @@ Edit `data/glossary.json` — any term you add there will never be freely
 translated by the model; it's protected and force-substituted with your
 exact translation for each language.
 
+## Speeding it up on CPU
+
+Translation (IndicTrans2/NLLB) and voiceover (Indic-TTS) always run on
+CPU regardless of GPU availability (see the GPU note below) — on a machine
+without Apple Silicon Metal, or with `WHISPER_NO_GPU=1` set, translation is
+typically the single largest chunk of a job's total time. Two knobs, both
+on by default:
+
+- **`TRANSLATION_NUM_BEAMS`** (`config.py`, default `1`) — beam width for
+  both IndicTrans2 and NLLB's `generate()`. Previously hardcoded to `5`.
+  Measured directly on this project's real cached NLLB checkpoint on an
+  8-segment batch: beam=5 took 23.1s, beam=1 (greedy) took 7.8s — **~3x
+  faster, identical output** on that batch. This mirrors the same
+  trade-off already made for `whisper.cpp` ASR decoding. If a specific
+  job's translation quality looks worse than expected, compare against
+  wider beam search without touching code:
+  ```bash
+  TRANSLATION_NUM_BEAMS=5 python app.py
+  ```
+  Changing this changes the translation-memory cache key
+  (`model_version_tag()`), so switching it never silently serves a
+  translation made at a different beam width.
+- **`BURN_IN_ENCODE_PRESET`** (`config.py`, default `"veryfast"`) — libx264
+  preset used only for the burned-in-subtitles MP4 (subtitle burn-in can't
+  be a stream copy, unlike voiceover muxing, which already uses `-c:v
+  copy`). Measured ~35% faster encode than the ffmpeg default (`medium`)
+  with no visible quality difference at the same CRF.
+
 ## Troubleshooting
 
 - **First run is slow** — expected; it's downloading ffmpeg binaries and/or
   ML models. Watch the terminal running `python app.py` for progress.
-- **CUDA / GPU** — set `WHISPER_DEVICE = "cuda"` and `WHISPER_COMPUTE_TYPE = "float16"` in `config.py` if you have an NVIDIA GPU; CPU (`int8`) is the safe default.
+- **GPU (Apple Silicon / Metal)** — ASR (`whisper.cpp`) uses Apple Metal
+  automatically when available; no config needed. To force CPU-only (e.g.
+  to A/B time a run without the GPU), set `WHISPER_NO_GPU=1` as an
+  environment variable before running `app.py`. Translation
+  (IndicTrans2/NLLB) and voiceover (Indic-TTS) already run CPU-only —
+  Metal only affects the ASR stage. See "Speeding it up on CPU" above for
+  the translation/encode-side knobs.
 - **IndicTrans2 401/gated errors** — see "The one manual step" above.
 - **Large files rejected** — limits are in `config.py` (`MAX_VIDEO_SIZE_MB`, `MAX_AUDIO_SIZE_MB`, durations) — raise them if your field files run longer than 15/30 minutes.
+- **Something failed mid-job** — check `jobs/pipeline.log` (also printed to
+  the terminal) for the full traceback. A failed job's partial output
+  under `jobs/<job_id>/` is automatically deleted rather than left behind
+  half-written.
