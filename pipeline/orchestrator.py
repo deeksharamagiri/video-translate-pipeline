@@ -920,14 +920,18 @@ def _run_job(
             quality_info,
     }
 
-    if (
-        voiceover_source_for_burn
-        and burned_path
-    ):
-
-        outputs[
-            "voiceover_mp4"
-        ] = burned_path
+    # NOTE: when both burned_in and voiceover are requested,
+    # burn_in_subtitles() above already burns the captions onto the
+    # voiceover (dubbed-audio) video rather than the plain source, so
+    # outputs["burned_in_mp4"] is a combined dub+captions file and
+    # outputs["voiceover_mp4"] (outputs_voiceover, set above) is the
+    # plain dub with no captions -- two genuinely distinct deliverables.
+    # This used to be collapsed into one file here by reassigning
+    # outputs["voiceover_mp4"] = burned_path, which silently discarded
+    # the plain-dub file from the API/UI's output listing entirely (the
+    # file itself is still written to jobs/<id>/output/, just orphaned)
+    # even though "voiceover" and "burned-in" are offered as two
+    # independently downloadable results.
 
     # =====================================================
     # Stage 5
