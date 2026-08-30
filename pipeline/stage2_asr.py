@@ -100,24 +100,38 @@ WHISPER_PROCESSORS = int(
 )
 
 
-# Greedy decoding is considerably cheaper than beam search.
+# Greedy decoding (best-of=1, beam=1) is considerably cheaper than beam
+# search, but was found to directly cause catastrophic hallucination on
+# real field audio -- not just lower-quality output.
 #
-# medium-q5_0 with the default best-of/beam values can spend a
-# substantial amount of time evaluating alternative candidates.
+# Verified directly: a genuinely clear, well-recorded Marathi clip
+# (BAIF field video "401.6", ~7 min) decoded as 100% repeated-token
+# garbage end-to-end at best-of=1/beam=1, with the correct language
+# forced explicitly (so this wasn't a language-detection problem). The
+# *identical* audio, same model, same thresholds, transcribed cleanly
+# throughout at best-of=5/beam=5. A worse video-wide hallucination rate
+# at beam=1 was also measured across a batch of 8 real field videos
+# (21-100% of each video's audio dropped as hallucinated repetition).
 #
-# For offline translation, deterministic greedy decoding gives a
-# much better speed/quality trade-off.
+# whisper.cpp's own CLI default is 5/5; we now match that rather than
+# overriding it down to 1, since the speed win isn't worth silent total
+# job failures. Still overridable via env if a deployment needs the
+# older speed/quality trade-off and has verified its own audio is clean
+# enough to tolerate it:
+#
+#     WHISPER_BEST_OF=1 WHISPER_BEAM_SIZE=1 python app.py
+#
 WHISPER_BEST_OF = int(
     os.environ.get(
         "WHISPER_BEST_OF",
-        "1",
+        "5",
     )
 )
 
 WHISPER_BEAM_SIZE = int(
     os.environ.get(
         "WHISPER_BEAM_SIZE",
-        "1",
+        "5",
     )
 )
 
