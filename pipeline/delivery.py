@@ -38,6 +38,18 @@ from config import (
 from pipeline.stage3_segment_tm import Segment
 
 
+class NoVoiceoverContentError(RuntimeError):
+    """
+    Raised by build_voiceover_track() when every segment's translated
+    text turned out to be empty or synthesizable-content-free (e.g. a
+    video where ASR hallucination consumed most of the runtime, leaving
+    only punctuation-only fragments in what survived). A distinct type
+    from a generic RuntimeError so callers can degrade gracefully
+    (skip voiceover, still deliver subtitles) instead of failing the
+    whole job outright -- see orchestrator.py's handling.
+    """
+
+
 def _run(cmd):
     proc = subprocess.run(
         cmd,
@@ -1543,13 +1555,23 @@ def build_voiceover_track(
                 else seg.text
             )
 
-            if not text.strip():
+            # Punctuation-only text (e.g. a lone "," left over from a
+            # translation/segmentation edge case) is not just "empty" by
+            # .strip(), but crashes Indic-TTS's FastPitch model the same
+            # way real emptiness would -- verified directly against a
+            # real job: translated_text=="," fed to synthesize() raised
+            # "Given groups=1, weight of size [256, 512, 3], expected
+            # input[1, 1, 512] to have 512 channels, but got 1 channels
+            # instead" (a degenerate phoneme sequence breaking FastPitch's
+            # conv1d shapes), so treat "no actual word characters" the
+            # same as empty rather than attempting synthesis.
+            if not re.search(r"\w", text, flags=re.UNICODE):
 
                 quality[
                     "warnings"
                 ].append(
                     f"Segment {seg.index}: "
-                    "empty translation skipped."
+                    "empty or punctuation-only translation skipped."
                 )
 
                 quality[
@@ -1797,8 +1819,9 @@ def build_voiceover_track(
 
     if not segment_wavs:
 
-        raise RuntimeError(
-            "No segments produced TTS audio."
+        raise NoVoiceoverContentError(
+            "No segments produced TTS audio -- every segment's "
+            "translated text was empty or had no synthesizable content."
         )
 
     # -----------------------------------------------------

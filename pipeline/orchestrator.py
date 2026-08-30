@@ -698,6 +698,13 @@ def _run_job(
                 "overall_quality_score"
             ] = 0.0
 
+            # Without this, `outputs_voiceover` is referenced further
+            # down (building the `outputs` dict) but was never assigned
+            # on this path -- a pre-existing NameError landmine that
+            # would crash the whole job the moment a target language
+            # with no Indic-TTS support requested voiceover.
+            outputs_voiceover = None
+
         else:
 
             _progress(
@@ -707,76 +714,149 @@ def _run_job(
                 92,
             )
 
-            with _Stage(timings, "voiceover_tts"):
+            try:
 
-                (
-                    voiceover_wav,
-                    voiceover_quality,
-                ) = delivery.build_voiceover_track(
-                    segments,
-                    target_lang,
-                    work_dir,
-                    speaker=tts_speaker,
+                with _Stage(timings, "voiceover_tts"):
+
+                    (
+                        voiceover_wav,
+                        voiceover_quality,
+                    ) = delivery.build_voiceover_track(
+                        segments,
+                        target_lang,
+                        work_dir,
+                        speaker=tts_speaker,
+                    )
+
+            except delivery.NoVoiceoverContentError as exc:
+
+                # A segment producing no synthesizable content (already
+                # counted as "SKIPPED"/"FAILED" in per-segment quality
+                # details) is one thing; EVERY segment being like that
+                # is a whole-video edge case, usually downstream of
+                # severe ASR hallucination leaving only fragments behind
+                # (verified directly: a real job where hallucination
+                # dropped most chunks and every surviving segment's
+                # translated text was just punctuation). That shouldn't
+                # take the whole job down with it -- subtitles/SRT/VTT
+                # from whatever ASR DID produce are still a real,
+                # deliverable result, so degrade the same way an
+                # unsupported target language already does (skip
+                # voiceover, keep going) rather than rolling everything
+                # back.
+                message = (
+                    f"Voiceover could not be generated for any segment "
+                    f"({exc}) -- skipping voiceover. Subtitles are "
+                    f"still produced from whatever speech was "
+                    f"transcribed."
                 )
 
-            # Preserve the translation metrics that were
-            # calculated before voiceover generation.
-            quality_info.update(
-                voiceover_quality
-            )
-
-            quality_info.update({
-                "overall_translation_quality_score":
-                    translation_quality[
-                        "overall_translation_quality_score"
-                    ],
-
-                "average_asr_confidence":
-                    translation_quality[
-                        "average_asr_confidence"
-                    ],
-
-                "translation_completeness_score":
-                    translation_quality[
-                        "translation_completeness_score"
-                    ],
-
-                "numeric_preservation_score":
-                    translation_quality[
-                        "numeric_preservation_score"
-                    ],
-
-                "translation_segments":
-                    translation_quality[
-                        "translation_segments"
-                    ],
-
-                "translation_warnings":
-                    translation_quality[
-                        "translation_warnings"
-                    ],
-            })
-
-            voiceover_path = os.path.join(
-                out_dir,
-                f"{job_id}_voiceover.mp4",
-            )
-
-            with _Stage(timings, "voiceover_mux"):
-
-                delivery.mux_voiceover_onto_video(
-                    local_input,
-                    voiceover_wav,
-                    voiceover_path,
+                _progress(
+                    progress_cb,
+                    "voiceover",
+                    message,
+                    92,
                 )
 
-            outputs_voiceover = (
-                voiceover_path
-            )
+                quality_info[
+                    "voiceover_requested"
+                ] = True
 
-            voiceover_source_for_burn = (
-                voiceover_path
-            )
+                quality_info[
+                    "warnings"
+                ].append(
+                    message
+                )
+
+                quality_info[
+                    "tts_coverage_percent"
+                ] = 0.0
+
+                quality_info[
+                    "overall_quality_score"
+                ] = 0.0
+
+                voiceover_wav = None
+
+            if voiceover_wav is not None:
+
+                # Preserve the translation metrics that were
+                # calculated before voiceover generation.
+                #
+                # quality_info["warnings"] may already hold the ASR
+                # dropped-audio warning (appended above, before this
+                # stage ever runs). voiceover_quality also has its own
+                # "warnings" key -- dict.update() would silently
+                # replace, not merge, that key, discarding the ASR
+                # warning even though it was already fully populated.
+                # Merge explicitly instead.
+                warnings_before_voiceover = quality_info["warnings"]
+
+                quality_info.update(
+                    voiceover_quality
+                )
+
+                quality_info["warnings"] = (
+                    warnings_before_voiceover
+                    + voiceover_quality.get("warnings", [])
+                )
+
+                quality_info.update({
+                    "overall_translation_quality_score":
+                        translation_quality[
+                            "overall_translation_quality_score"
+                        ],
+
+                    "average_asr_confidence":
+                        translation_quality[
+                            "average_asr_confidence"
+                        ],
+
+                    "translation_completeness_score":
+                        translation_quality[
+                            "translation_completeness_score"
+                        ],
+
+                    "numeric_preservation_score":
+                        translation_quality[
+                            "numeric_preservation_score"
+                        ],
+
+                    "translation_segments":
+                        translation_quality[
+                            "translation_segments"
+                        ],
+
+                    "translation_warnings":
+                        translation_quality[
+                            "translation_warnings"
+                        ],
+                })
+
+                voiceover_path = os.path.join(
+                    out_dir,
+                    f"{job_id}_voiceover.mp4",
+                )
+
+                with _Stage(timings, "voiceover_mux"):
+
+                    delivery.mux_voiceover_onto_video(
+                        local_input,
+                        voiceover_wav,
+                        voiceover_path,
+                    )
+
+                outputs_voiceover = (
+                    voiceover_path
+                )
+
+                voiceover_source_for_burn = (
+                    voiceover_path
+                )
+
+            else:
+
+                outputs_voiceover = None
 
     else:
 
