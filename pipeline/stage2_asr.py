@@ -36,6 +36,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+import wave
 
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -1203,12 +1204,56 @@ def run_stage2(
         result.segments
     )
 
+    _clamp_segments_to_audio_duration(
+        result.segments,
+        wav_path,
+    )
+
     return result
 
 
 # ============================================================
 # Timestamp correction
 # ============================================================
+
+def _clamp_segments_to_audio_duration(
+    segments: List[TranscriptSegment],
+    wav_path: str,
+):
+    """
+    Clamp the final segment's end time to the actual audio file's own
+    duration.
+
+    whisper.cpp's own timestamps (or _extend_undertimed_segments'
+    correction above, which has no upper bound) can occasionally run
+    slightly past the real end of the audio -- verified directly against
+    a real job: a final segment timestamped to end 9.4s after the source
+    video's actual (ffprobe-confirmed) duration. Downstream, that
+    over-length timestamp reaches the SRT/VTT (a caption "ending" after
+    the video already stopped) and voiceover placement (dub audio timed
+    to a slot that doesn't fully exist). Only the last segment can run
+    past the file's real end (earlier segments are already bounded by
+    the segment after them), so only it needs checking.
+    """
+
+    if not segments:
+        return
+
+    try:
+        with wave.open(wav_path, "rb") as wf:
+            audio_duration = wf.getnframes() / float(wf.getframerate())
+    except Exception:
+        # Don't fail a whole job over a best-effort sanity clamp.
+        return
+
+    last = segments[-1]
+
+    if last.end > audio_duration:
+        last.end = max(
+            audio_duration,
+            last.start,
+        )
+
 
 def _extend_undertimed_segments(
     segments: List[TranscriptSegment],
