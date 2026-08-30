@@ -10,6 +10,12 @@ uploads_tmp
 # automatically on first use, not source. data/glossary.json stays tracked.
 data/translation_memory.db
 
+# QA batch-run output (run_batch_qa.py / qa_analyze.py) — local run
+# artifacts with machine-specific absolute paths, not source.
+batch_qa_manifest.json
+batch_qa_run.log
+qa_report.json
+
 # Python bytecode / build artifacts
 *.pyc
 *.pyo

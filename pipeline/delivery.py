@@ -38,6 +38,18 @@ from config import (
 from pipeline.stage3_segment_tm import Segment
 
 
+class NoVoiceoverContentError(RuntimeError):
+    """
+    Raised by build_voiceover_track() when every segment's translated
+    text turned out to be empty or synthesizable-content-free (e.g. a
+    video where ASR hallucination consumed most of the runtime, leaving
+    only punctuation-only fragments in what survived). A distinct type
+    from a generic RuntimeError so callers can degrade gracefully
+    (skip voiceover, still deliver subtitles) instead of failing the
+    whole job outright -- see orchestrator.py's handling.
+    """
+
+
 def _run(cmd):
     proc = subprocess.run(
         cmd,
@@ -1543,13 +1555,23 @@ def build_voiceover_track(
                 else seg.text
             )
 
-            if not text.strip():
+            # Punctuation-only text (e.g. a lone "," left over from a
+            # translation/segmentation edge case) is not just "empty" by
+            # .strip(), but crashes Indic-TTS's FastPitch model the same
+            # way real emptiness would -- verified directly against a
+            # real job: translated_text=="," fed to synthesize() raised
+            # "Given groups=1, weight of size [256, 512, 3], expected
+            # input[1, 1, 512] to have 512 channels, but got 1 channels
+            # instead" (a degenerate phoneme sequence breaking FastPitch's
+            # conv1d shapes), so treat "no actual word characters" the
+            # same as empty rather than attempting synthesis.
+            if not re.search(r"\w", text, flags=re.UNICODE):
 
                 quality[
                     "warnings"
                 ].append(
                     f"Segment {seg.index}: "
-                    "empty translation skipped."
+                    "empty or punctuation-only translation skipped."
                 )
 
                 quality[
@@ -1743,6 +1765,14 @@ def build_voiceover_track(
                     "segment": seg.index,
                     "start": seg.start,
                     "end": seg.end,
+                    # Where the dubbed audio actually landed, which can
+                    # differ from seg.start/seg.end above once drift
+                    # catch-up shifts a segment's placement -- used to
+                    # resync burned-in captions to the audible dub rather
+                    # than the original (pre-drift) ASR timing. See
+                    # orchestrator.py's burned-in-on-voiceover step.
+                    "placed_start": placed_start,
+                    "placed_end": placed_start + duration,
                     "source_text": seg.text,
                     "translated_text": text,
                     "tts_duration": duration,
@@ -1797,8 +1827,9 @@ def build_voiceover_track(
 
     if not segment_wavs:
 
-        raise RuntimeError(
-            "No segments produced TTS audio."
+        raise NoVoiceoverContentError(
+            "No segments produced TTS audio -- every segment's "
+            "translated text was empty or had no synthesizable content."
         )
 
     # -----------------------------------------------------
@@ -2116,6 +2147,18 @@ def mux_voiceover_onto_video(
 
     else:
 
+        # The synthesized voiceover track is stitched from individual TTS
+        # segments and is NOT guaranteed to reach the source video's exact
+        # duration (e.g. a trailing outro/credits stretch after the last
+        # subtitle segment has no corresponding dubbed audio). "-shortest"
+        # alone resolves to min(video, audio) -- if the voiceover track is
+        # the shorter stream, that silently truncates the OUTPUT VIDEO
+        # ITSELF to match it, dropping real trailing video frames (verified
+        # directly: up to 40s / 6.9% of a real field video's runtime cut
+        # this way). "-af apad" pads the audio with silence for as long as
+        # needed first, so the audio stream is never the shorter one --
+        # "-shortest" then only ever trims padding silence off the tail of
+        # the (now-longer) audio to match the video, never the video itself.
         _run([
             FFMPEG_BINARY,
             "-y",
@@ -2129,6 +2172,8 @@ def mux_voiceover_onto_video(
             "1:a",
             "-c:v",
             "copy",
+            "-af",
+            "apad",
             "-shortest",
             out_mp4_path,
         ])

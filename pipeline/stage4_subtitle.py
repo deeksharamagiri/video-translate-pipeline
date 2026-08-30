@@ -6,6 +6,7 @@ Stage 4 — Subtitle Generation (Python)
   - Gap enforcement between subtitles
 """
 import textwrap
+from dataclasses import replace
 from typing import List
 
 from config import MAX_CHARS_PER_LINE, MAX_LINES_PER_SUBTITLE, MIN_GAP_BETWEEN_SUBTITLES_SEC
@@ -29,15 +30,27 @@ def _wrap_text(text: str) -> List[str]:
 
 
 def _enforce_gaps(segments: List[Segment]) -> List[Segment]:
-    """Ensure at least MIN_GAP_BETWEEN_SUBTITLES_SEC between consecutive cues."""
-    for i in range(1, len(segments)):
-        prev, cur = segments[i - 1], segments[i]
+    """
+    Ensure at least MIN_GAP_BETWEEN_SUBTITLES_SEC between consecutive cues.
+
+    Returns a new list with `replace()`-built copies for any segment whose
+    start gets pushed forward, rather than mutating the input segments in
+    place. `segments` here is the same shared list orchestrator.py later
+    passes to build_voiceover_track() and the job report/archive stages --
+    in-place mutation here was previously leaking subtitle-only gap
+    adjustments into the ASR timestamps voiceover placement is computed
+    from, before those stages even ran, silently shifting dubbed-audio
+    placement away from the original ASR timing it was supposed to track.
+    """
+    out = list(segments)
+    for i in range(1, len(out)):
+        prev, cur = out[i - 1], out[i]
         if cur.start < prev.end + MIN_GAP_BETWEEN_SUBTITLES_SEC:
             cur_start = prev.end + MIN_GAP_BETWEEN_SUBTITLES_SEC
             if cur_start < cur.end:
-                cur.start = cur_start
+                out[i] = replace(cur, start=cur_start)
             # if it would invert start>end, leave as-is (extremely tight ASR timing edge case)
-    return segments
+    return out
 
 
 def _format_timestamp_srt(seconds: float) -> str:
@@ -56,7 +69,55 @@ def _format_timestamp_vtt(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
+def _drop_zero_duration(segments: List[Segment]) -> List[Segment]:
+    """
+    Drop segments with end <= start before writing them out.
+
+    These are never visible to a real subtitle renderer (zero or negative
+    display time) -- verified directly against real job output, e.g. an
+    entry with start == end == 72.000s written as
+    "00:01:12,000 --> 00:01:12,000". Filtered here rather than upstream so
+    the shared `segments` list (also used by the job report and
+    translation-memory archiving) is left untouched -- only what actually
+    gets written to the subtitle file changes.
+    """
+    return [s for s in segments if s.end > s.start]
+
+
+def _merge_duplicate_consecutive(segments: List[Segment]) -> List[Segment]:
+    """
+    Merge adjacent segments whose translated text is byte-identical.
+
+    Verified directly against real job output: two consecutive SRT
+    entries with the exact same text, ~4s apart -- almost certainly a
+    segmentation artifact (one utterance split across a chunk boundary)
+    rather than the speaker deliberately repeating the line twice in a
+    row. Merging (not dropping) preserves full time coverage: the kept
+    entry spans from the first segment's start to the last's end.
+    """
+    if not segments:
+        return segments
+
+    # Builds a new list of (possibly replaced) Segment objects rather than
+    # mutating in place -- `segments` here is the same shared list used
+    # elsewhere (job report, translation-memory archiving), and this
+    # function must not alter it, only what generate_srt/generate_vtt go
+    # on to write out.
+    merged = [segments[0]]
+    for seg in segments[1:]:
+        prev = merged[-1]
+        prev_text = (prev.translated_text if prev.translated_text is not None else prev.text).strip()
+        seg_text = (seg.translated_text if seg.translated_text is not None else seg.text).strip()
+        if seg_text and seg_text == prev_text:
+            merged[-1] = replace(prev, end=seg.end)
+        else:
+            merged.append(seg)
+    return merged
+
+
 def generate_srt(segments: List[Segment], out_path: str) -> str:
+    segments = _drop_zero_duration(segments)
+    segments = _merge_duplicate_consecutive(segments)
     segments = _enforce_gaps(segments)
     lines = []
     for i, seg in enumerate(segments, start=1):
@@ -72,6 +133,8 @@ def generate_srt(segments: List[Segment], out_path: str) -> str:
 
 
 def generate_vtt(segments: List[Segment], out_path: str) -> str:
+    segments = _drop_zero_duration(segments)
+    segments = _merge_duplicate_consecutive(segments)
     segments = _enforce_gaps(segments)
     lines = ["WEBVTT", ""]
     for seg in segments:

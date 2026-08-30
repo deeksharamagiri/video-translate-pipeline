@@ -36,6 +36,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+import wave
 
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -46,6 +47,7 @@ from config import (
     WHISPER_CPP_MODEL_DIR,
     WHISPER_CPP_MODEL_PATH,
     WHISPER_CPP_MODEL_URL,
+    WHISPER_LANG_MAP,
     INDIC_CONFORMER_MODEL,
     INDIC_CONFORMER_DECODING,
     INDIC_CONFORMER_LANG_MAP,
@@ -99,24 +101,38 @@ WHISPER_PROCESSORS = int(
 )
 
 
-# Greedy decoding is considerably cheaper than beam search.
+# Greedy decoding (best-of=1, beam=1) is considerably cheaper than beam
+# search, but was found to directly cause catastrophic hallucination on
+# real field audio -- not just lower-quality output.
 #
-# medium-q5_0 with the default best-of/beam values can spend a
-# substantial amount of time evaluating alternative candidates.
+# Verified directly: a genuinely clear, well-recorded Marathi clip
+# (BAIF field video "401.6", ~7 min) decoded as 100% repeated-token
+# garbage end-to-end at best-of=1/beam=1, with the correct language
+# forced explicitly (so this wasn't a language-detection problem). The
+# *identical* audio, same model, same thresholds, transcribed cleanly
+# throughout at best-of=5/beam=5. A worse video-wide hallucination rate
+# at beam=1 was also measured across a batch of 8 real field videos
+# (21-100% of each video's audio dropped as hallucinated repetition).
 #
-# For offline translation, deterministic greedy decoding gives a
-# much better speed/quality trade-off.
+# whisper.cpp's own CLI default is 5/5; we now match that rather than
+# overriding it down to 1, since the speed win isn't worth silent total
+# job failures. Still overridable via env if a deployment needs the
+# older speed/quality trade-off and has verified its own audio is clean
+# enough to tolerate it:
+#
+#     WHISPER_BEST_OF=1 WHISPER_BEAM_SIZE=1 python app.py
+#
 WHISPER_BEST_OF = int(
     os.environ.get(
         "WHISPER_BEST_OF",
-        "1",
+        "5",
     )
 )
 
 WHISPER_BEAM_SIZE = int(
     os.environ.get(
         "WHISPER_BEAM_SIZE",
-        "1",
+        "5",
     )
 )
 
@@ -245,6 +261,14 @@ class ASRResult:
     detected_language: str
     language_probability: float
     segments: List[TranscriptSegment] = field(
+        default_factory=list
+    )
+    # (start, end) ranges whisper.cpp produced but which were dropped as
+    # hallucinated repetition -- surfaced so a job with real coverage
+    # gaps says so, instead of silently having no subtitles/translation
+    # for that stretch with no indication why (previously this only ever
+    # reached a print() statement, never the caller).
+    dropped_ranges: List[tuple] = field(
         default_factory=list
     )
 
@@ -782,6 +806,43 @@ def run_stage2(
         )
 
     # --------------------------------------------------------
+    # Normalise language_hint to whisper.cpp's own code
+    # --------------------------------------------------------
+    #
+    # Callers elsewhere in this codebase (the web UI, run_job) pass our
+    # internal 3-letter codes (e.g. "mar"), but whisper.cpp's `-l` flag
+    # only understands its own codes (mostly 2-letter, e.g. "mr") -- an
+    # unrecognised value doesn't error, it makes whisper-cli print its
+    # own --help text and exit 0 with zero transcribed segments. Convert
+    # here so every caller is protected, not just the ones that remember
+    # to convert first.
+    whisper_language_hint = language_hint
+
+    if language_hint:
+
+        mapped = WHISPER_LANG_MAP.get(language_hint)
+
+        if mapped:
+
+            whisper_language_hint = mapped
+
+        elif language_hint not in WHISPER_LANG_MAP.values():
+
+            # Neither a known 3-letter code we can map, nor already one
+            # of whisper.cpp's own 2-letter codes -- most likely one of
+            # the 8 INDIC_LANGS whisper.cpp has no checkpoint for at all
+            # (Bodo, Dogri, Kashmiri, Konkani, Maithili, Manipuri, Odia,
+            # Santali). Fall back to auto-detect rather than silently
+            # producing zero segments.
+            print(
+                "[stage2_asr] Warning: whisper.cpp has no language "
+                f"support for {language_hint!r} -- falling back to "
+                "auto-detect."
+            )
+
+            whisper_language_hint = None
+
+    # --------------------------------------------------------
     # Temporary output directory
     # --------------------------------------------------------
 
@@ -796,7 +857,7 @@ def run_stage2(
             model_path=model_path,
             wav_path=wav_path,
             out_prefix=out_prefix,
-            language_hint=language_hint,
+            language_hint=whisper_language_hint,
         )
 
         print(
@@ -810,7 +871,7 @@ def run_stage2(
 
         print(
             f"[stage2_asr]   language: "
-            f"{language_hint or 'auto'}"
+            f"{whisper_language_hint or 'auto'}"
         )
 
         print(
@@ -1075,6 +1136,10 @@ def run_stage2(
 
             dropped_repetition += 1
 
+            result.dropped_ranges.append(
+                (start, end)
+            )
+
             print(
                 "[stage2_asr] Dropping "
                 f"hallucinated repetition "
@@ -1151,12 +1216,56 @@ def run_stage2(
         result.segments
     )
 
+    _clamp_segments_to_audio_duration(
+        result.segments,
+        wav_path,
+    )
+
     return result
 
 
 # ============================================================
 # Timestamp correction
 # ============================================================
+
+def _clamp_segments_to_audio_duration(
+    segments: List[TranscriptSegment],
+    wav_path: str,
+):
+    """
+    Clamp the final segment's end time to the actual audio file's own
+    duration.
+
+    whisper.cpp's own timestamps (or _extend_undertimed_segments'
+    correction above, which has no upper bound) can occasionally run
+    slightly past the real end of the audio -- verified directly against
+    a real job: a final segment timestamped to end 9.4s after the source
+    video's actual (ffprobe-confirmed) duration. Downstream, that
+    over-length timestamp reaches the SRT/VTT (a caption "ending" after
+    the video already stopped) and voiceover placement (dub audio timed
+    to a slot that doesn't fully exist). Only the last segment can run
+    past the file's real end (earlier segments are already bounded by
+    the segment after them), so only it needs checking.
+    """
+
+    if not segments:
+        return
+
+    try:
+        with wave.open(wav_path, "rb") as wf:
+            audio_duration = wf.getnframes() / float(wf.getframerate())
+    except Exception:
+        # Don't fail a whole job over a best-effort sanity clamp.
+        return
+
+    last = segments[-1]
+
+    if last.end > audio_duration:
+        last.end = max(
+            audio_duration,
+            last.start,
+        )
+
 
 def _extend_undertimed_segments(
     segments: List[TranscriptSegment],

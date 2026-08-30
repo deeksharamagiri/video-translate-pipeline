@@ -3,6 +3,7 @@ config.py — single source of truth for the whole pipeline.
 Every limit / model name here maps 1:1 to a box in the architecture slide.
 """
 import os
+import shutil
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -12,6 +13,16 @@ MODELS_DIR = os.path.join(BASE_DIR, "models")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(JOBS_DIR, exist_ok=True)
 os.makedirs(MODELS_DIR, exist_ok=True)
+
+# A real system ffmpeg (apt/brew/etc.), if one is already on PATH before we
+# add static-ffmpeg's own bundled binaries below, is far more likely to
+# link a modern libass than the specific static-ffmpeg pip package build
+# this project pins -- see the libass 0.15.2 note further down. Captured
+# before add_paths() runs, since that prepends the bundled binaries' own
+# directory onto PATH and would otherwise shadow a perfectly good system
+# ffmpeg that was already there.
+_preexisting_system_ffmpeg = shutil.which("ffmpeg")
+_preexisting_system_ffprobe = shutil.which("ffprobe")
 
 # ---------------------------------------------------------------------------
 # Auto-provision FFmpeg/FFprobe binaries via the `static-ffmpeg` pip package.
@@ -44,19 +55,63 @@ except Exception as _e:  # pragma: no cover - defensive; real ffmpeg on PATH sti
 # ---------------------------------------------------------------------------
 
 
-def _resolve_ffmpeg_binary(env_var: str, fallback: str) -> str:
-    return os.environ.get(env_var) or fallback
+def _ffmpeg_has_subtitles_filter(ffmpeg_path: str) -> bool:
+    # A system ffmpeg being present on PATH is not by itself proof it can
+    # burn subtitles -- some distro/Homebrew builds ship with libass
+    # entirely compiled out (verified directly: a Homebrew ffmpeg 9.0.1
+    # build on this machine has NO "subtitles" entry in `ffmpeg -filters`
+    # at all and fails every burn-in job outright with "No option name",
+    # which is a strictly worse outcome than static-ffmpeg's merely
+    # imperfect libass 0.15.2). Actually querying the candidate binary's
+    # own registered filters is the only reliable way to know.
+    import subprocess
+    try:
+        proc = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-filters"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return " subtitles " in proc.stdout or "\nsubtitles " in proc.stdout
+    except Exception:
+        return False
 
 
-FFMPEG_BINARY = _resolve_ffmpeg_binary("FFMPEG_BINARY", "ffmpeg")
-FFPROBE_BINARY = _resolve_ffmpeg_binary("FFPROBE_BINARY", "ffprobe")
+def _resolve_ffmpeg_binary(env_var: str, preexisting_system_binary, fallback: str) -> str:
+    # Explicit env var always wins -- assume the operator verified it.
+    # Otherwise, prefer a system binary that was already on PATH before
+    # static-ffmpeg's bundled one got added, but only if it actually
+    # supports burning in subtitles at all; a system ffmpeg without libass
+    # compiled in would make every burn-in job fail outright, which is
+    # worse than static-ffmpeg's known-imperfect-but-functional libass
+    # 0.15.2. Falls back to the bundled build otherwise.
+    env_value = os.environ.get(env_var)
+    if env_value:
+        return env_value
+
+    if preexisting_system_binary and _ffmpeg_has_subtitles_filter(preexisting_system_binary):
+        return preexisting_system_binary
+
+    return fallback
+
+
+FFMPEG_BINARY = _resolve_ffmpeg_binary("FFMPEG_BINARY", _preexisting_system_ffmpeg, "ffmpeg")
+FFPROBE_BINARY = _resolve_ffmpeg_binary("FFPROBE_BINARY", _preexisting_system_ffprobe, "ffprobe")
 if FFMPEG_BINARY == "ffmpeg":
     print("[config] Using the auto-provisioned static-ffmpeg binary -- its bundled "
           "libass (0.15.2) mis-renders complex scripts (Devanagari/Thai/Arabic) in "
-          "burned-in subtitles (matras may be misplaced). Install an ffmpeg build "
-          "with libass 0.17+ and set FFMPEG_BINARY/FFPROBE_BINARY to it to fix this.")
+          "burned-in subtitles (matras may be misplaced). No system ffmpeg with a "
+          "working subtitles filter was found on PATH to prefer instead. Install an "
+          "ffmpeg build with libass 0.17+ (e.g. `brew install ffmpeg` / "
+          "`apt install ffmpeg`, confirming `ffmpeg -filters | grep subtitles` is "
+          "non-empty) and it will be preferred automatically, or set "
+          "FFMPEG_BINARY/FFPROBE_BINARY explicitly.")
 else:
-    print(f"[config] Using ffmpeg with fixed libass shaping for subtitles: {FFMPEG_BINARY}")
+    print(f"[config] Using ffmpeg with a working subtitles filter (verified via "
+          f"`-filters`) for burned-in subtitles: {FFMPEG_BINARY} -- not the "
+          f"static-ffmpeg build known to mis-shape Devanagari/Thai/Arabic. Its "
+          f"libass version was not independently confirmed here; verify with "
+          f"`{FFMPEG_BINARY} -version` if unsure.")
 
 # ---------- VIDEO INPUT / AUDIO INPUT limits (top boxes) ----------
 MAX_VIDEO_DURATION_SEC = 15 * 60          # "Up to 15 min"
@@ -97,6 +152,26 @@ WHISPER_CPP_MODEL_PATH = os.path.join(WHISPER_CPP_MODEL_DIR, WHISPER_CPP_MODEL_F
 WHISPER_CPP_MODEL_URL = (
     f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{WHISPER_CPP_MODEL_FILENAME}"
 )
+
+# whisper.cpp's own `-l` flag takes its language codes, which are mostly
+# ISO-639-1 (2-letter) -- e.g. "mr", not our internal 3-letter "mar". Every
+# other caller of a 3-letter code in this codebase (source_lang_hint from
+# the UI/API, INDIC_LANGS, etc.) needs translating through this map before
+# it reaches whisper.cpp, or whisper-cli silently treats the value as
+# unrecognised, prints its own --help text, and exits 0 with zero
+# transcribed segments -- no error, just an empty transcript.
+#
+# Verified empirically against whisper-cli directly (each candidate code
+# passed via `-l <code>` on real audio): only 14 of our 22 INDIC_LANGS have
+# a whisper.cpp checkpoint at all. The other 8 (Bodo, Dogri, Kashmiri,
+# Konkani, Maithili, Manipuri, Odia, Santali) have no whisper.cpp language
+# support whatsoever, mapped or not -- those fall back to auto-detect with
+# a logged warning rather than being passed through as an invalid code.
+WHISPER_LANG_MAP = {
+    "asm": "as", "ben": "bn", "guj": "gu", "hin": "hi", "kan": "kn",
+    "mal": "ml", "mar": "mr", "nep": "ne", "pan": "pa", "san": "sa",
+    "snd": "sd", "tam": "ta", "tel": "te", "urd": "ur", "eng": "en",
+}
 
 # ---------- Stage 3 — Segmentation + Translation Memory ----------
 TM_DB_PATH = os.path.join(DATA_DIR, "translation_memory.db")
