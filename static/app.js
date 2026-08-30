@@ -135,6 +135,19 @@ function renderResults(jobId, result) {
     <div class="stat-chip"><span class="chip-icon">🌐</span> TRANSLATED <b>${srcName} → ${tgtName}</b></div>
   `;
 
+  const warnings = (s.quality && s.quality.warnings) || [];
+  const qualityWarningsEl = document.getElementById('qualityWarnings');
+  if (warnings.length) {
+    qualityWarningsEl.hidden = false;
+    qualityWarningsEl.innerHTML = `
+      <div class="qw-title">⚠ Quality warnings</div>
+      <ul>${warnings.map(w => `<li>${w}</li>`).join('')}</ul>
+    `;
+  } else {
+    qualityWarningsEl.hidden = true;
+    qualityWarningsEl.innerHTML = '';
+  }
+
   downloadsEl.innerHTML = '';
   result.available_downloads.forEach(key => {
     const meta = DOWNLOAD_META[key];

@@ -263,6 +263,14 @@ class ASRResult:
     segments: List[TranscriptSegment] = field(
         default_factory=list
     )
+    # (start, end) ranges whisper.cpp produced but which were dropped as
+    # hallucinated repetition -- surfaced so a job with real coverage
+    # gaps says so, instead of silently having no subtitles/translation
+    # for that stretch with no indication why (previously this only ever
+    # reached a print() statement, never the caller).
+    dropped_ranges: List[tuple] = field(
+        default_factory=list
+    )
 
 
 # ============================================================
@@ -1127,6 +1135,10 @@ def run_stage2(
         ):
 
             dropped_repetition += 1
+
+            result.dropped_ranges.append(
+                (start, end)
+            )
 
             print(
                 "[stage2_asr] Dropping "

@@ -302,6 +302,8 @@ def _run_job(
                 pre.subtitle_srt_path
             )
 
+        asr_dropped_ranges = []
+
     else:
 
         _progress(
@@ -322,6 +324,10 @@ def _run_job(
 
             asr_segments = (
                 asr_result.segments
+            )
+
+            asr_dropped_ranges = (
+                asr_result.dropped_ranges
             )
 
             detected_lang = (
@@ -623,6 +629,27 @@ def _run_job(
 
         "warnings": [],
     }
+
+    if asr_dropped_ranges:
+
+        gap_desc = ", ".join(
+            f"{s:.0f}s-{e:.0f}s"
+            for s, e in asr_dropped_ranges
+        )
+
+        total_dropped_sec = sum(
+            e - s
+            for s, e in asr_dropped_ranges
+        )
+
+        quality_info["warnings"].append(
+            f"{total_dropped_sec:.0f}s of audio ({gap_desc}) could not be "
+            "transcribed reliably (whisper.cpp produced repeated-token "
+            "hallucination there, which was dropped) and has no subtitles, "
+            "translation, or voiceover as a result. Try re-running with an "
+            "explicit source language, or a different WHISPER_BEAM_SIZE/"
+            "WHISPER_BEST_OF, if this stretch has real speech."
+        )
 
     # =====================================================
     # Voiceover
