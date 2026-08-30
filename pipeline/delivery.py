@@ -2147,6 +2147,18 @@ def mux_voiceover_onto_video(
 
     else:
 
+        # The synthesized voiceover track is stitched from individual TTS
+        # segments and is NOT guaranteed to reach the source video's exact
+        # duration (e.g. a trailing outro/credits stretch after the last
+        # subtitle segment has no corresponding dubbed audio). "-shortest"
+        # alone resolves to min(video, audio) -- if the voiceover track is
+        # the shorter stream, that silently truncates the OUTPUT VIDEO
+        # ITSELF to match it, dropping real trailing video frames (verified
+        # directly: up to 40s / 6.9% of a real field video's runtime cut
+        # this way). "-af apad" pads the audio with silence for as long as
+        # needed first, so the audio stream is never the shorter one --
+        # "-shortest" then only ever trims padding silence off the tail of
+        # the (now-longer) audio to match the video, never the video itself.
         _run([
             FFMPEG_BINARY,
             "-y",
@@ -2160,6 +2172,8 @@ def mux_voiceover_onto_video(
             "1:a",
             "-c:v",
             "copy",
+            "-af",
+            "apad",
             "-shortest",
             out_mp4_path,
         ])
