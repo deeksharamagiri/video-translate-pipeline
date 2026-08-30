@@ -38,6 +38,7 @@ import shutil
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Callable, Optional
 
 from config import (
@@ -890,11 +891,38 @@ def _run_job(
             or local_input
         )
 
+        # When burning onto the dubbed voiceover video, resync caption
+        # timing to where the dubbed audio actually landed rather than
+        # the original ASR timestamps: build_voiceover_track() places
+        # each segment at a drift-bounded earliest_start that can differ
+        # from seg.start/seg.end by several seconds once catch-up
+        # compression kicks in (see delivery.py's VOICEOVER_MAX_DRIFT_SEC
+        # handling). Burning the *original* timing onto the *dubbed*
+        # audio was verified to produce captions measurably out of sync
+        # with the voice actually speaking them. When burning onto the
+        # plain (undubbed) source video instead, the original ASR timing
+        # is correct as-is and is left untouched.
+        burn_in_srt_path = srt_path
+
+        if voiceover_source_for_burn:
+
+            burn_in_srt_path = (
+                _write_voiceover_synced_srt(
+                    segments,
+                    voiceover_quality.get(
+                        "segment_details",
+                        [],
+                    ),
+                    work_dir,
+                    job_id,
+                )
+            )
+
         with _Stage(timings, "burn_in_subtitles"):
 
             delivery.burn_in_subtitles(
                 source_video,
-                srt_path,
+                burn_in_srt_path,
                 burned_path,
             )
 
@@ -1036,6 +1064,71 @@ def _run_job(
     }
 
     return outputs
+
+
+def _write_voiceover_synced_srt(
+    segments,
+    segment_details,
+    work_dir,
+    job_id,
+):
+    """
+    Write a temporary SRT whose timestamps match where the dubbed
+    voiceover audio actually landed (segment_details["placed_start"/
+    "placed_end"]) rather than the original ASR timing, for use only
+    when burning captions onto the voiceover video. The main SRT/VTT
+    deliverables are untouched -- those still describe the original
+    audio's timing, which is correct when paired with it.
+
+    Segments without a matching placed_start/placed_end (TTS failed or
+    was skipped for that segment) keep their original ASR timing rather
+    than being dropped, so no caption goes missing from the burned-in
+    track just because that one segment's dub audio didn't render.
+    """
+
+    placement_by_index = {
+        d["segment"]: d
+        for d in segment_details
+        if "placed_start" in d
+        and "placed_end" in d
+    }
+
+    resynced = []
+
+    for seg in segments:
+
+        placement = placement_by_index.get(
+            seg.index
+        )
+
+        if (
+            placement
+            and placement["placed_end"] > placement["placed_start"]
+        ):
+
+            resynced.append(
+                replace(
+                    seg,
+                    start=placement["placed_start"],
+                    end=placement["placed_end"],
+                )
+            )
+
+        else:
+
+            resynced.append(seg)
+
+    out_path = os.path.join(
+        work_dir,
+        f"{job_id}_voiceover_synced.srt",
+    )
+
+    stage4_subtitle.generate_srt(
+        resynced,
+        out_path,
+    )
+
+    return out_path
 
 
 def _normalize_lang(

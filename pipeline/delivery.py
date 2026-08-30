@@ -1765,6 +1765,14 @@ def build_voiceover_track(
                     "segment": seg.index,
                     "start": seg.start,
                     "end": seg.end,
+                    # Where the dubbed audio actually landed, which can
+                    # differ from seg.start/seg.end above once drift
+                    # catch-up shifts a segment's placement -- used to
+                    # resync burned-in captions to the audible dub rather
+                    # than the original (pre-drift) ASR timing. See
+                    # orchestrator.py's burned-in-on-voiceover step.
+                    "placed_start": placed_start,
+                    "placed_end": placed_start + duration,
                     "source_text": seg.text,
                     "translated_text": text,
                     "tts_duration": duration,
