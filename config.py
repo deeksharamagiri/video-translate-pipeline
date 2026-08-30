@@ -153,6 +153,26 @@ WHISPER_CPP_MODEL_URL = (
     f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{WHISPER_CPP_MODEL_FILENAME}"
 )
 
+# whisper.cpp's own `-l` flag takes its language codes, which are mostly
+# ISO-639-1 (2-letter) -- e.g. "mr", not our internal 3-letter "mar". Every
+# other caller of a 3-letter code in this codebase (source_lang_hint from
+# the UI/API, INDIC_LANGS, etc.) needs translating through this map before
+# it reaches whisper.cpp, or whisper-cli silently treats the value as
+# unrecognised, prints its own --help text, and exits 0 with zero
+# transcribed segments -- no error, just an empty transcript.
+#
+# Verified empirically against whisper-cli directly (each candidate code
+# passed via `-l <code>` on real audio): only 14 of our 22 INDIC_LANGS have
+# a whisper.cpp checkpoint at all. The other 8 (Bodo, Dogri, Kashmiri,
+# Konkani, Maithili, Manipuri, Odia, Santali) have no whisper.cpp language
+# support whatsoever, mapped or not -- those fall back to auto-detect with
+# a logged warning rather than being passed through as an invalid code.
+WHISPER_LANG_MAP = {
+    "asm": "as", "ben": "bn", "guj": "gu", "hin": "hi", "kan": "kn",
+    "mal": "ml", "mar": "mr", "nep": "ne", "pan": "pa", "san": "sa",
+    "snd": "sd", "tam": "ta", "tel": "te", "urd": "ur", "eng": "en",
+}
+
 # ---------- Stage 3 — Segmentation + Translation Memory ----------
 TM_DB_PATH = os.path.join(DATA_DIR, "translation_memory.db")
 SEGMENT_MAX_CHARS = 200                   # chunking granularity before hashing

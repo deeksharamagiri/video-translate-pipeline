@@ -46,6 +46,7 @@ from config import (
     WHISPER_CPP_MODEL_DIR,
     WHISPER_CPP_MODEL_PATH,
     WHISPER_CPP_MODEL_URL,
+    WHISPER_LANG_MAP,
     INDIC_CONFORMER_MODEL,
     INDIC_CONFORMER_DECODING,
     INDIC_CONFORMER_LANG_MAP,
@@ -782,6 +783,43 @@ def run_stage2(
         )
 
     # --------------------------------------------------------
+    # Normalise language_hint to whisper.cpp's own code
+    # --------------------------------------------------------
+    #
+    # Callers elsewhere in this codebase (the web UI, run_job) pass our
+    # internal 3-letter codes (e.g. "mar"), but whisper.cpp's `-l` flag
+    # only understands its own codes (mostly 2-letter, e.g. "mr") -- an
+    # unrecognised value doesn't error, it makes whisper-cli print its
+    # own --help text and exit 0 with zero transcribed segments. Convert
+    # here so every caller is protected, not just the ones that remember
+    # to convert first.
+    whisper_language_hint = language_hint
+
+    if language_hint:
+
+        mapped = WHISPER_LANG_MAP.get(language_hint)
+
+        if mapped:
+
+            whisper_language_hint = mapped
+
+        elif language_hint not in WHISPER_LANG_MAP.values():
+
+            # Neither a known 3-letter code we can map, nor already one
+            # of whisper.cpp's own 2-letter codes -- most likely one of
+            # the 8 INDIC_LANGS whisper.cpp has no checkpoint for at all
+            # (Bodo, Dogri, Kashmiri, Konkani, Maithili, Manipuri, Odia,
+            # Santali). Fall back to auto-detect rather than silently
+            # producing zero segments.
+            print(
+                "[stage2_asr] Warning: whisper.cpp has no language "
+                f"support for {language_hint!r} -- falling back to "
+                "auto-detect."
+            )
+
+            whisper_language_hint = None
+
+    # --------------------------------------------------------
     # Temporary output directory
     # --------------------------------------------------------
 
@@ -796,7 +834,7 @@ def run_stage2(
             model_path=model_path,
             wav_path=wav_path,
             out_prefix=out_prefix,
-            language_hint=language_hint,
+            language_hint=whisper_language_hint,
         )
 
         print(
@@ -810,7 +848,7 @@ def run_stage2(
 
         print(
             f"[stage2_asr]   language: "
-            f"{language_hint or 'auto'}"
+            f"{whisper_language_hint or 'auto'}"
         )
 
         print(
