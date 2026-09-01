@@ -115,8 +115,7 @@ function pollStatus(jobId) {
 }
 
 const DOWNLOAD_META = {
-  vtt: { key: 'vtt', icon: '📝', name: 'Subtitles (.vtt)', desc: 'Web subtitle format' },
-  voiceover_mp4: { key: 'voiceover', icon: '🎙️', name: 'Voiceover Video (.mp4)', desc: 'Dubbed audio track' },
+  burned_in_mp4: { key: 'burned_in', icon: '🎬', name: 'Burned-in Video (.mp4)', desc: 'Captions burned into the video' },
 };
 
 const LANG_NAMES = {
