@@ -134,18 +134,10 @@ function renderResults(jobId, result) {
     <div class="stat-chip"><span class="chip-icon">🌐</span> TRANSLATED <b>${srcName} → ${tgtName}</b></div>
   `;
 
-  const warnings = (s.quality && s.quality.warnings) || [];
-  const qualityWarningsEl = document.getElementById('qualityWarnings');
-  if (warnings.length) {
-    qualityWarningsEl.hidden = false;
-    qualityWarningsEl.innerHTML = `
-      <div class="qw-title">⚠ Quality warnings</div>
-      <ul>${warnings.map(w => `<li>${w}</li>`).join('')}</ul>
-    `;
-  } else {
-    qualityWarningsEl.hidden = true;
-    qualityWarningsEl.innerHTML = '';
-  }
+  // Quality warnings are intentionally not shown here -- they're printed
+  // to the server terminal / jobs/pipeline.log instead (see orchestrator
+  // .run_job's end-of-job summary), so field operators watching the
+  // console still see them without cluttering the UI.
 
   downloadsEl.innerHTML = '';
   result.available_downloads.forEach(key => {

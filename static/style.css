@@ -397,15 +397,6 @@ main:has(#resultsPanel:not([hidden])) .step[data-step="3"] .step-label { color: 
 .stat-chip:nth-child(4) { animation-delay: 0.26s; }
 .stat-chip b { color: var(--accent); }
 
-.quality-warnings {
-  font-family: var(--sans); font-size: 13px; color: var(--ink);
-  border: 1px solid var(--accent2); border-left-width: 4px; border-radius: 8px;
-  padding: 12px 14px; margin-bottom: 16px; background: rgba(var(--accent2-rgb), 0.08);
-}
-.quality-warnings ul { margin: 6px 0 0; padding-left: 20px; }
-.quality-warnings li { margin-bottom: 4px; }
-.quality-warnings .qw-title { font-weight: 700; color: var(--accent2); }
-
 .downloads { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
 .dl-card {
   border: 1px solid var(--panel-border); border-radius: 10px; padding: 16px;
