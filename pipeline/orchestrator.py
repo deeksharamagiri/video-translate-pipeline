@@ -138,6 +138,25 @@ def _print_timing_summary(job_id: str, timings: dict, total_elapsed: float):
     )
 
 
+def _print_quality_warnings(job_id: str, warnings: list):
+    # Quality warnings (dropped ASR audio, voiceover timing drift, TTS
+    # failures, etc.) are deliberately not shown in the web UI -- they're
+    # printed here instead, so an operator watching the terminal running
+    # `python app.py` (or reading jobs/pipeline.log) still sees them
+    # without cluttering the results the UI hands back to the browser.
+    # The full detail also still reaches the DOCX Job Report.
+
+    if not warnings:
+        return
+
+    print(f"\n[orchestrator] Job {job_id} quality warnings:")
+
+    for w in warnings:
+        print(f"[orchestrator]   ⚠ {w}")
+
+    print()
+
+
 def run_job(
     input_path: str,
     source_lang_hint: Optional[str],
@@ -1028,6 +1047,11 @@ def _run_job(
         job_id,
         timings,
         total_elapsed,
+    )
+
+    _print_quality_warnings(
+        job_id,
+        quality_info["warnings"],
     )
 
     outputs["stats"] = {
