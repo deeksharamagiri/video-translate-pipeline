@@ -16,140 +16,610 @@ const downloadsEl = document.getElementById('downloads');
 
 let selectedFile = null;
 
-dropzone.addEventListener('click', () => fileInput.click());
-dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
-dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
-dropzone.addEventListener('drop', (e) => {
-  e.preventDefault();
-  dropzone.classList.remove('dragover');
-  if (e.dataTransfer.files.length) setFile(e.dataTransfer.files[0]);
-});
-fileInput.addEventListener('change', () => {
-  if (fileInput.files.length) setFile(fileInput.files[0]);
-});
-dzClear.addEventListener('click', (e) => {
-  e.stopPropagation();
-  selectedFile = null;
-  fileInput.value = '';
-  dzContent.hidden = false;
-  dzFile.hidden = true;
-  submitBtn.disabled = true;
-});
+
+// ============================================================
+// File selection
+// ============================================================
+
+dropzone.addEventListener(
+  'click',
+  () => fileInput.click()
+);
+
+
+dropzone.addEventListener(
+  'dragover',
+  (e) => {
+    e.preventDefault();
+    dropzone.classList.add('dragover');
+  }
+);
+
+
+dropzone.addEventListener(
+  'dragleave',
+  () => {
+    dropzone.classList.remove('dragover');
+  }
+);
+
+
+dropzone.addEventListener(
+  'drop',
+  (e) => {
+
+    e.preventDefault();
+
+    dropzone.classList.remove(
+      'dragover'
+    );
+
+    if (
+      e.dataTransfer.files.length
+    ) {
+
+      setFile(
+        e.dataTransfer.files[0]
+      );
+    }
+  }
+);
+
+
+fileInput.addEventListener(
+  'change',
+  () => {
+
+    if (
+      fileInput.files.length
+    ) {
+
+      setFile(
+        fileInput.files[0]
+      );
+    }
+  }
+);
+
+
+// ============================================================
+// Clear selected file
+// ============================================================
+
+dzClear.addEventListener(
+  'click',
+  (e) => {
+
+    e.stopPropagation();
+
+    selectedFile = null;
+
+    fileInput.value = '';
+
+    dzContent.hidden = false;
+
+    dzFile.hidden = true;
+
+    submitBtn.disabled = true;
+  }
+);
+
+
+// ============================================================
+// Set selected file
+// ============================================================
 
 function setFile(file) {
+
   selectedFile = file;
-  dzFileName.textContent = `${file.name}  (${(file.size / (1024 * 1024)).toFixed(1)} MB)`;
+
+  dzFileName.textContent =
+    `${file.name}  (${(
+      file.size /
+      (1024 * 1024)
+    ).toFixed(1)} MB)`;
+
   dzContent.hidden = true;
+
   dzFile.hidden = false;
+
   submitBtn.disabled = false;
+
   formError.hidden = true;
 }
 
-submitBtn.addEventListener('click', async () => {
-  if (!selectedFile) return;
-  formError.hidden = true;
-  submitBtn.disabled = true;
-  submitBtn.classList.add('is-processing');
-  progressMsg.textContent = 'Uploading...';
-  progressPct.textContent = '0%';
-  progressBarInner.style.width = '0%';
 
-  const fd = new FormData();
-  fd.append('file', selectedFile);
-  fd.append('source_lang', '');
-  fd.append('target_lang', document.getElementById('targetLang').value);
-  fd.append('burned_in', 'true');
-  fd.append('voiceover', 'true');
-  fd.append('engine', 'auto');
+// ============================================================
+// Start processing
+// ============================================================
 
-  try {
-    const res = await fetch('/api/upload', { method: 'POST', body: fd });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Upload failed.');
+submitBtn.addEventListener(
+  'click',
+  async () => {
 
-    resultsPanel.hidden = true;
-    pollStatus(data.job_id);
-  } catch (err) {
-    formError.textContent = err.message;
-    formError.hidden = false;
-    submitBtn.disabled = false;
-    submitBtn.classList.remove('is-processing');
-  }
-});
+    if (!selectedFile) {
+      return;
+    }
 
-function pollStatus(jobId) {
-  const interval = setInterval(async () => {
+    formError.hidden = true;
+
+    submitBtn.disabled = true;
+
+    submitBtn.classList.add(
+      'is-processing'
+    );
+
+    progressMsg.textContent =
+      'Uploading...';
+
+    progressPct.textContent =
+      '0%';
+
+    progressBarInner.style.width =
+      '0%';
+
+    const fd =
+      new FormData();
+
+    fd.append(
+      'file',
+      selectedFile
+    );
+
+    fd.append(
+      'source_lang',
+      ''
+    );
+
+    fd.append(
+      'target_lang',
+      document.getElementById(
+        'targetLang'
+      ).value
+    );
+
+    // --------------------------------------------------------
+    // Always request both required outputs.
+    // --------------------------------------------------------
+
+    fd.append(
+      'burned_in',
+      'true'
+    );
+
+    fd.append(
+      'voiceover',
+      'true'
+    );
+
+    fd.append(
+      'engine',
+      'auto'
+    );
+
     try {
-      const res = await fetch(`/api/status/${jobId}`);
-      const data = await res.json();
 
-      if (data.progress) {
-        progressBarInner.style.width = `${data.progress.pct}%`;
-        progressMsg.textContent = data.progress.message;
-        progressPct.textContent = `${data.progress.pct}%`;
+      const res =
+        await fetch(
+          '/api/upload',
+          {
+            method: 'POST',
+            body: fd,
+          }
+        );
+
+      const data =
+        await res.json();
+
+      if (!res.ok) {
+
+        throw new Error(
+          data.error ||
+          'Upload failed.'
+        );
       }
 
-      if (data.error) {
-        clearInterval(interval);
-        formError.textContent = `Error: ${data.error}`;
-        formError.hidden = false;
-        submitBtn.disabled = false;
-        submitBtn.classList.remove('is-processing');
+      resultsPanel.hidden =
+        true;
+
+      pollStatus(
+        data.job_id
+      );
+
+    } catch (err) {
+
+      formError.textContent =
+        err.message;
+
+      formError.hidden = false;
+
+      submitBtn.disabled =
+        false;
+
+      submitBtn.classList.remove(
+        'is-processing'
+      );
+    }
+  }
+);
+
+
+// ============================================================
+// Poll job status
+// ============================================================
+
+function pollStatus(jobId) {
+
+  const interval =
+    setInterval(
+      async () => {
+
+        try {
+
+          const res =
+            await fetch(
+              `/api/status/${jobId}`
+            );
+
+          const data =
+            await res.json();
+
+          // --------------------------------------------------
+          // Progress
+          // --------------------------------------------------
+
+          if (data.progress) {
+
+            progressBarInner.style.width =
+              `${data.progress.pct}%`;
+
+            progressMsg.textContent =
+              data.progress.message;
+
+            progressPct.textContent =
+              `${data.progress.pct}%`;
+          }
+
+          // --------------------------------------------------
+          // Error
+          // --------------------------------------------------
+
+          if (data.error) {
+
+            clearInterval(
+              interval
+            );
+
+            formError.textContent =
+              `Error: ${data.error}`;
+
+            formError.hidden = false;
+
+            submitBtn.disabled =
+              false;
+
+            submitBtn.classList.remove(
+              'is-processing'
+            );
+
+            return;
+          }
+
+          // --------------------------------------------------
+          // Completed
+          // --------------------------------------------------
+
+          if (data.result) {
+
+            clearInterval(
+              interval
+            );
+
+            renderResults(
+              jobId,
+              data.result
+            );
+
+            submitBtn.disabled =
+              false;
+
+            submitBtn.classList.remove(
+              'is-processing'
+            );
+          }
+
+        } catch (err) {
+
+          clearInterval(
+            interval
+          );
+
+          formError.textContent =
+            `Connection error: ${err.message}`;
+
+          formError.hidden = false;
+
+          submitBtn.disabled =
+            false;
+
+          submitBtn.classList.remove(
+            'is-processing'
+          );
+        }
+
+      },
+      1200
+    );
+}
+
+
+// ============================================================
+// Dashboard download metadata
+// ============================================================
+
+/*
+ * IMPORTANT
+ *
+ * These are the ONLY files displayed on the dashboard.
+ *
+ * The pipeline may generate:
+ *
+ *   SRT
+ *   VTT
+ *   PDF
+ *   DOCX
+ *   voiceover MP4
+ *   burned-in MP4
+ *
+ * But only the following two are user-facing.
+ */
+
+const DOWNLOAD_META = {
+
+  burned_in_mp4: {
+
+    key: 'burned_in',
+
+    icon: '🎬',
+
+    name:
+      'Burned-in Voiceover + Subtitles (.mp4)',
+
+    desc:
+      'Translated voiceover with subtitles burned into the video',
+  },
+
+
+  subtitles_pdf: {
+
+    key: 'subtitles_pdf',
+
+    icon: '📄',
+
+    name:
+      'Subtitle PDF (.pdf)',
+
+    desc:
+      'Translated subtitles with timestamps',
+  },
+};
+
+
+// ============================================================
+// Required dashboard order
+// ============================================================
+
+const DOWNLOAD_ORDER = [
+
+  'burned_in_mp4',
+
+  'subtitles_pdf',
+];
+
+
+// ============================================================
+// Language names
+// ============================================================
+
+const LANG_NAMES = {
+
+  hin: 'Hindi',
+
+  eng: 'English',
+
+  mar: 'Marathi',
+
+  ben: 'Bengali',
+
+  tam: 'Tamil',
+
+  tel: 'Telugu',
+
+  kan: 'Kannada',
+
+  mal: 'Malayalam',
+
+  guj: 'Gujarati',
+
+  pan: 'Punjabi',
+
+  urd: 'Urdu',
+
+  asm: 'Assamese',
+
+  mai: 'Maithili',
+
+  nep: 'Nepali',
+
+  san: 'Sanskrit',
+
+  ori: 'Odia',
+
+  fra: 'French',
+
+  spa: 'Spanish',
+
+  deu: 'German',
+
+  zho: 'Chinese',
+
+  ara: 'Arabic',
+
+  por: 'Portuguese',
+
+  rus: 'Russian',
+
+  jpn: 'Japanese',
+};
+
+
+// ============================================================
+// Render results
+// ============================================================
+
+function renderResults(
+  jobId,
+  result
+) {
+
+  resultsPanel.hidden = false;
+
+  const s =
+    result.stats;
+
+  const srcName =
+    LANG_NAMES[s.source_lang] ||
+    s.source_lang;
+
+  const tgtName =
+    LANG_NAMES[s.target_lang] ||
+    s.target_lang;
+
+
+  // ==========================================================
+  // Translation summary
+  // ==========================================================
+
+  statsRow.innerHTML = `
+
+    <div class="stat-chip">
+
+      <span class="chip-icon">
+        🌐
+      </span>
+
+      TRANSLATED
+
+      <b>
+        ${srcName} → ${tgtName}
+      </b>
+
+    </div>
+
+  `;
+
+
+  // ==========================================================
+  // Quality warnings are intentionally not shown here.
+  // ==========================================================
+
+  /*
+   * Quality warnings remain in:
+   *
+   *   pipeline.log
+   *
+   * and the generated Job Report DOCX.
+   *
+   * They are intentionally not shown in the
+   * user-facing dashboard.
+   */
+
+
+  // ==========================================================
+  // Clear previous download cards
+  // ==========================================================
+
+  downloadsEl.innerHTML = '';
+
+
+  // ==========================================================
+  // Render ONLY the two approved downloads
+  // ==========================================================
+
+  DOWNLOAD_ORDER.forEach(
+    (key) => {
+
+      // ------------------------------------------------------
+      // Do not render a file that the backend says
+      // does not exist.
+      // ------------------------------------------------------
+
+      if (
+        !result.available_downloads ||
+        !result.available_downloads.includes(
+          key
+        )
+      ) {
+
         return;
       }
 
-      if (data.result) {
-        clearInterval(interval);
-        renderResults(jobId, data.result);
-        submitBtn.disabled = false;
-        submitBtn.classList.remove('is-processing');
+
+      const meta =
+        DOWNLOAD_META[key];
+
+
+      if (!meta) {
+        return;
       }
-    } catch (err) {
-      clearInterval(interval);
-      formError.textContent = `Connection error: ${err.message}`;
-      formError.hidden = false;
-      submitBtn.disabled = false;
-      submitBtn.classList.remove('is-processing');
+
+
+      // ------------------------------------------------------
+      // Create card
+      // ------------------------------------------------------
+
+      const card =
+        document.createElement(
+          'div'
+        );
+
+      card.className =
+        'dl-card';
+
+
+      card.innerHTML = `
+
+        <div class="dl-name">
+
+          <span class="chip-icon">
+            ${meta.icon}
+          </span>
+
+          ${meta.name}
+
+        </div>
+
+
+        <div class="dl-desc">
+
+          ${meta.desc}
+
+        </div>
+
+
+        <a
+          href="/api/download/${jobId}/${meta.key}"
+          download
+        >
+          Download
+        </a>
+
+      `;
+
+
+      downloadsEl.appendChild(
+        card
+      );
     }
-  }, 1200);
-}
-
-const DOWNLOAD_META = {
-  burned_in_mp4: { key: 'burned_in', icon: '🎬', name: 'Burned-in Video (.mp4)', desc: 'Captions burned into the video' },
-};
-
-const LANG_NAMES = {
-  hin: 'Hindi', eng: 'English', mar: 'Marathi', ben: 'Bengali', tam: 'Tamil',
-  tel: 'Telugu', kan: 'Kannada', mal: 'Malayalam', guj: 'Gujarati',
-  pan: 'Punjabi', urd: 'Urdu', asm: 'Assamese', mai: 'Maithili',
-};
-
-function renderResults(jobId, result) {
-  resultsPanel.hidden = false;
-  const s = result.stats;
-  const srcName = LANG_NAMES[s.source_lang] || s.source_lang;
-  const tgtName = LANG_NAMES[s.target_lang] || s.target_lang;
-
-  statsRow.innerHTML = `
-    <div class="stat-chip"><span class="chip-icon">🌐</span> TRANSLATED <b>${srcName} → ${tgtName}</b></div>
-  `;
-
-  // Quality warnings are intentionally not shown here -- they're printed
-  // to the server terminal / jobs/pipeline.log instead (see orchestrator
-  // .run_job's end-of-job summary), so field operators watching the
-  // console still see them without cluttering the UI.
-
-  downloadsEl.innerHTML = '';
-  result.available_downloads.forEach(key => {
-    const meta = DOWNLOAD_META[key];
-    if (!meta) return;
-    const card = document.createElement('div');
-    card.className = 'dl-card';
-    card.innerHTML = `
-      <div class="dl-name"><span class="chip-icon">${meta.icon}</span> ${meta.name}</div>
-      <div class="dl-desc">${meta.desc}</div>
-      <a href="/api/download/${jobId}/${meta.key}" download>Download</a>
-    `;
-    downloadsEl.appendChild(card);
-  });
+  );
 }
