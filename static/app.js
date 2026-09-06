@@ -197,6 +197,11 @@ submitBtn.addEventListener(
       'auto'
     );
 
+    fd.append(
+      'asr_engine',
+      'indic_conformer'
+    );
+
     try {
 
       const res =
