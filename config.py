@@ -395,47 +395,31 @@ VOICEOVER_MAX_TEMPO_RATIO = 1.2   # clamp; within native atempo range (0.5-2.0),
 # against original timing) was verified against a real job to cause several
 # seconds of audio/video desync within any run of tightly-packed segments --
 # reported as "the screen moves onto another frame but the output audio is
-# still of the previous frame". VOICEOVER_MAX_DRIFT_SEC bounds this: once a
-# segment's earliest possible start (after the previous segment) has
+# still of the previous frame". VOICEOVER_MAX_DRIFT_SEC is the target: once
+# a segment's earliest possible start (after the previous segment) has
 # drifted more than this far from its own original subtitle start, that
-# segment gets compressed harder -- up to VOICEOVER_CATCHUP_MAX_TEMPO_RATIO
-# -- specifically to pull the timeline back within budget, instead of
-# letting drift keep compounding.
+# segment gets compressed harder to try to pull the timeline back within
+# budget, instead of letting drift keep compounding.
 #
-# VOICEOVER_CATCHUP_MAX_TEMPO_RATIO was briefly narrowed from 1.6 to 1.3 to
-# make catch-up bursts sound less jarring. That was a mistake: this ratio
-# isn't just a naturalness knob, it's what makes the VOICEOVER_MAX_DRIFT_SEC
-# guarantee actually hold -- when a segment needs more compression than the
-# ceiling allows to stay in budget, the code intentionally lets it exceed
-# the drift cap rather than distort the audio further (see the "physical
-# intelligibility floor" comment in delivery.py). Weakening the ceiling to
-# 1.3 therefore weakened the sync guarantee itself, not just pacing --
-# verified on a real job: max drift went from ~1.5s to 13.7s. Reverted to
-# 1.6 (the value actually validated to keep drift bounded). The zero-
-# duration-segment bug in stage2_asr.py that was injecting most of the
-# drift bursts in the first place is now fixed at its source, which should
-# also mean the 1.6 ceiling gets invoked less often than before -- i.e.
-# smoother pacing AND bounded sync, rather than trading one for the other.
-#
-# That held for the systemic (12-occurrence) zero-duration case, but a real
-# job still showed 6.35s of drift afterward -- traced to a different,
-# rarer failure mode: whisper.cpp assigning a segment a slot wildly too
-# short for its actual content (one case: a 128-char sentence, ~10.8s of
-# real TTS speech, given only a 0.84s window) with almost no room before
-# the next segment's own start -- not enough runway for any tempo
-# compression, however aggressive, to fully absorb. stage2_asr.py now
-# extends such segments' timing where there's room to (capped at the next
-# segment's start, never creating an overlap), which helps the common
-# case; for the genuinely pathological case above there wasn't enough room
-# regardless. Raised the ceiling to 2.0 -- the native atempo range's own
-# limit (see _build_atempo_chain), so this still never triggers filter
-# chaining/its extra quality loss -- and tightened the drift budget to 1.0s,
-# which together brought that same job's worst-case drift down from 6.35s
-# to ~4.55s. Not a full elimination of every possible case (that would need
-# smarter multi-segment lookahead scheduling, a bigger change), but a large,
-# measured improvement, and the common/systemic causes are now gone.
+# This used to escalate to a separate, more aggressive
+# VOICEOVER_CATCHUP_MAX_TEMPO_RATIO (previously as high as 2.0, i.e. double
+# speed) specifically for that catch-up case. Verified against a real job
+# that this reads as "the audio speeding up randomly" -- most segments play
+# at a gentle, consistent pace, then an occasional segment is compressed
+# to 2x speed to claw back drift, which is far more jarring than the drift
+# itself. Removed that separate ceiling: catch-up compression is now capped
+# at the exact same VOICEOVER_MAX_TEMPO_RATIO used everywhere else, so
+# pace never varies by more than the same +/-20% band throughout the whole
+# track. The trade-off (see the "physical intelligibility floor" comment in
+# delivery.py) is that when a segment's content is far longer than its slot
+# plus the drift budget combined, the gentler cap can't claw back enough,
+# so drift in that pathological case can now exceed VOICEOVER_MAX_DRIFT_SEC
+# by more than it used to -- accepted deliberately, since consistent pace
+# was the priority once burned-in captions were resynced to wherever the
+# dubbed audio actually lands (see orchestrator.py's
+# _write_voiceover_synced_srt) rather than the original ASR timing, which
+# was the main casualty of that drift previously.
 VOICEOVER_MAX_DRIFT_SEC = 1.0
-VOICEOVER_CATCHUP_MAX_TEMPO_RATIO = 2.0   # only used while actively catching up drift; native atempo ceiling
 
 # ---------- Stage 4 — Subtitle Generation ----------
 MAX_CHARS_PER_LINE = 42
