@@ -452,6 +452,104 @@ def _ensure_whispercpp_model() -> str:
 # Hallucination / repetition detection
 # ============================================================
 
+# Unicode block ranges for the scripts our supported languages use.
+_SCRIPT_RANGES = {
+    "Devanagari": (0x0900, 0x097F),  # Hindi, Marathi, Nepali, Sanskrit, Bodo, Dogri, Konkani, Maithili
+    "Bengali": (0x0980, 0x09FF),     # Bengali, Assamese
+    "Gurmukhi": (0x0A00, 0x0A7F),    # Punjabi
+    "Gujarati": (0x0A80, 0x0AFF),
+    "Oriya": (0x0B00, 0x0B7F),
+    "Tamil": (0x0B80, 0x0BFF),
+    "Telugu": (0x0C00, 0x0C7F),
+    "Kannada": (0x0C80, 0x0CFF),
+    "Malayalam": (0x0D00, 0x0D7F),
+}
+
+# Maps every language code that could show up as whisper.cpp's own
+# detected_language (its native 2-letter codes) or as our internal
+# 3-letter code (the language_hint fallback in run_stage2) to the script
+# its speech should be written in.
+_LANG_EXPECTED_SCRIPT = {
+    "hi": "Devanagari", "hin": "Devanagari",
+    "mr": "Devanagari", "mar": "Devanagari",
+    "ne": "Devanagari", "nep": "Devanagari",
+    "sa": "Devanagari", "san": "Devanagari",
+    "bn": "Bengali", "ben": "Bengali",
+    "as": "Bengali", "asm": "Bengali",
+    "pa": "Gurmukhi", "pan": "Gurmukhi",
+    "gu": "Gujarati", "guj": "Gujarati",
+    "or": "Oriya", "ori": "Oriya",
+    "ta": "Tamil", "tam": "Tamil",
+    "te": "Telugu", "tel": "Telugu",
+    "kn": "Kannada", "kan": "Kannada",
+    "ml": "Malayalam", "mal": "Malayalam",
+}
+
+# A segment needs at least this many script-block characters before its
+# script mix is trusted as evidence either way -- a two-word segment is
+# too short to judge reliably and risks false positives.
+_MIN_SCRIPT_CHARS_TO_JUDGE = 8
+
+
+def _is_wrong_script(text: str, expected_language: str) -> bool:
+    """
+    Detect decoded text written in an Indic script that doesn't match the
+    audio's own (detected or hinted) language -- a hallucination pattern
+    distinct from _is_degenerate_repetition's mechanical token/character
+    loops.
+
+    Verified directly on real field audio ("401.1.mp4", Marathi/Devanagari
+    speech): whisper.cpp's beam=5 decode confidently produced fluent,
+    non-repeating text in entirely unrelated scripts for large stretches
+    -- "ব ব ব ব..." (Bengali) in one run, "਷ਿਲਿਪਾਲਨ ਷ਿਲਿਪਾਲਨ..." (Gurmukhi)
+    in another, same audio, same settings, just different runs (whisper.cpp's
+    decode has run-to-run variance). Because this text doesn't loop the
+    same short token/phrase, _is_degenerate_repetition doesn't catch it --
+    it silently passed through as "real" output, vanishing from the final
+    subtitles without ever being counted in dropped_ranges. A job with
+    ~80% of its audio affected this way still reported "finished ok" with
+    no indication anything was wrong -- reported as "not producing any
+    output at all". This doesn't recover the correct transcription for
+    that stretch (whisper.cpp simply couldn't decode it right), but it
+    makes the gap visible through the same dropped-ranges warning as any
+    other unrecoverable stretch, instead of a silently near-empty job.
+    """
+
+    expected_script = _LANG_EXPECTED_SCRIPT.get(expected_language)
+
+    if expected_script is None:
+        # Unknown/unmapped language (e.g. non-Indic, or a script this
+        # check doesn't cover) -- nothing to compare against.
+        return False
+
+    expected_range = _SCRIPT_RANGES[expected_script]
+
+    matching_chars = 0
+    other_script_chars = 0
+
+    for ch in text:
+
+        codepoint = ord(ch)
+
+        for script_name, (lo, hi) in _SCRIPT_RANGES.items():
+
+            if lo <= codepoint <= hi:
+
+                if script_name == expected_script:
+                    matching_chars += 1
+                else:
+                    other_script_chars += 1
+
+                break
+
+    total = matching_chars + other_script_chars
+
+    if total < _MIN_SCRIPT_CHARS_TO_JUDGE:
+        return False
+
+    return (other_script_chars / total) > 0.5
+
+
 def _is_degenerate_repetition(text: str) -> bool:
     """
     Detect obvious Whisper repetition loops.
@@ -537,6 +635,66 @@ def _is_degenerate_repetition(text: str) -> bool:
     return False
 
 
+def _drop_consecutive_duplicate_segments(
+    segments: list,
+    dropped_ranges: list,
+) -> int:
+    """
+    Drop segments whose text exactly repeats the immediately preceding
+    segment's text -- a distinct hallucination pattern from
+    _is_degenerate_repetition (which only catches repetition *within* one
+    segment's own text, e.g. one word or short phrase looping).
+
+    Verified directly against a real job: whisper.cpp transcribed the
+    same ~24s stretch of coherent-looking text identically across 3
+    consecutive decode windows in a row (158-182s, 182-205s, 205-230s).
+    Each segment's own text doesn't internally repeat, so the existing
+    filter doesn't flag any of them -- they survive as several
+    individually-plausible segments. Left alone, a later display-layer
+    dedup pass (stage4_subtitle.py's duplicate-caption merge, meant for
+    genuine short split-utterance artifacts) would then merge all of
+    them into one nonsensical 72-second caption. Handled the same way as
+    any other hallucination instead: all but the first occurrence are
+    dropped and counted in dropped_ranges, so it's surfaced through the
+    same "N seconds of audio could not be transcribed reliably" warning
+    as any other unrecoverable stretch, rather than silently producing a
+    misleading giant caption.
+
+    Mutates `segments` in place (removes items) and appends to
+    `dropped_ranges`. Returns the number of segments dropped.
+    """
+
+    dropped = 0
+    i = 1
+
+    while i < len(segments):
+
+        prev_text = segments[i - 1].text.strip()
+        cur = segments[i]
+
+        if cur.text.strip() and cur.text.strip() == prev_text:
+
+            dropped_ranges.append(
+                (cur.start, cur.end)
+            )
+
+            print(
+                "[stage2_asr] Dropping segment-level "
+                f"repeated transcription [{cur.start:.2f}-"
+                f"{cur.end:.2f}]: {cur.text[:120]!r}"
+            )
+
+            del segments[i]
+
+            dropped += 1
+
+        else:
+
+            i += 1
+
+    return dropped
+
+
 # ============================================================
 # Confidence
 # ============================================================
@@ -601,6 +759,140 @@ def _segment_confidence(
         sum(probs) / len(probs),
         3,
     )
+
+
+# Minimum gap between two consecutive tokens' own timestamps, in seconds,
+# treated as a natural pause worth splitting a caption on. whisper.cpp has
+# no VAD and decodes in ~30s windows regardless of pauses (that's
+# deliberate -- see WHISPER_BEST_OF/WHISPER_BEAM_SIZE's comment on why
+# VAD-based filtering was tried and reverted here), so a single raw
+# segment can span a full window as one caption even when the speaker
+# paused for several seconds partway through it.
+SEGMENT_SPLIT_GAP_SEC = 0.7
+
+
+def _split_on_internal_pauses(
+    tokens: list,
+    start: float,
+    end: float,
+    text: str,
+    confidence: float,
+):
+    """
+    Split one already-decoded, already-accepted segment into several
+    smaller ones at internal pauses, using each token's own offsets.
+
+    This is purely a re-chunking of text/timing that whisper.cpp already
+    successfully produced -- nothing gets dropped or re-decoded, unlike
+    VAD-based filtering (which runs *before* decoding and can misjudge
+    real speech as silence). If a segment has no usable per-token
+    offsets, or no internal gap large enough to split on, it's returned
+    unchanged as a single piece -- this only ever produces equal or finer
+    granularity, never coarser.
+
+    Returns a list of (start, end, text, confidence) tuples.
+    """
+
+    fallback = [(start, end, text, confidence)]
+
+    # A segment whose own declared end <= start is already the "badly
+    # undertimed" case _extend_undertimed_segments (below) exists to fix
+    # -- verified directly that such segments can carry token-level
+    # offsets inconsistent with the segment's own boundaries (e.g. token
+    # offsets referencing an earlier decode window entirely), which would
+    # make gap-based splitting here produce nonsense (negative
+    # durations, single-character fragments). Leave these to the
+    # existing correction pass instead of guessing from unreliable
+    # per-token data.
+    if end <= start:
+        return fallback
+
+    words = [
+        token
+        for token in tokens
+        if not str(token.get("text", "")).strip().startswith("[")
+        and token.get("offsets", {}).get("from") is not None
+        and token.get("offsets", {}).get("to") is not None
+    ]
+
+    if not words:
+        return fallback
+
+    groups = [[words[0]]]
+
+    for prev_token, cur_token in zip(words, words[1:]):
+
+        gap_sec = (
+            cur_token["offsets"]["from"]
+            - prev_token["offsets"]["to"]
+        ) / 1000.0
+
+        if gap_sec >= SEGMENT_SPLIT_GAP_SEC:
+            groups.append([])
+
+        groups[-1].append(cur_token)
+
+    if len(groups) <= 1:
+        return fallback
+
+    pieces = []
+    # Small slack for rounding between the segment's own declared bounds
+    # and its tokens' individual offsets -- not zero tolerance, since
+    # whisper.cpp's segment- and token-level timestamps don't always
+    # agree to the millisecond even in the normal case.
+    tolerance_sec = 1.0
+
+    for group in groups:
+
+        piece_text = "".join(
+            str(t.get("text", "")) for t in group
+        ).strip()
+
+        if not piece_text:
+            continue
+
+        piece_start = group[0]["offsets"]["from"] / 1000.0
+        piece_end = group[-1]["offsets"]["to"] / 1000.0
+
+        # Sanity-check against the segment's own declared bounds -- if
+        # the tokens' offsets disagree with them by more than a rounding
+        # slack, the token-level data for this entry isn't trustworthy;
+        # bail out to the single unsplit segment entirely rather than
+        # split on bad data.
+        #
+        # Also bail out if a piece's own duration is too short for its
+        # text length by the same 12-chars/sec heuristic
+        # _extend_undertimed_segments (below) uses to detect "obviously
+        # too short" timestamps. Verified directly against a real job:
+        # whisper.cpp's per-token offsets can degrade partway through a
+        # long segment, with every remaining token pinned to the exact
+        # same timestamp (the segment's own end) instead of real
+        # individual timing -- a piece built from a run of those tokens
+        # gets a near-zero duration for real text, which
+        # _extend_undertimed_segments would then "correct" by stretching
+        # it forward to the start of whatever the next real segment
+        # happens to be, however far away that is (one real case: a
+        # ~5s phrase stretched into a 72-second caption). Splitting on
+        # unreliable per-token data is worse than not splitting at all.
+        piece_duration = piece_end - piece_start
+        piece_estimated_min_duration = max(0.4, len(piece_text) / 12.0) * 0.5
+
+        if (
+            piece_end <= piece_start
+            or piece_start < start - tolerance_sec
+            or piece_end > end + tolerance_sec
+            or piece_duration < piece_estimated_min_duration
+        ):
+            return fallback
+
+        pieces.append((
+            piece_start,
+            piece_end,
+            piece_text,
+            _segment_confidence(group),
+        ))
+
+    return pieces if pieces else fallback
 
 
 # ============================================================
@@ -1070,6 +1362,7 @@ def run_stage2(
     )
 
     dropped_repetition = 0
+    dropped_wrong_script = 0
     dropped_empty = 0
 
     for entry in transcription:
@@ -1150,6 +1443,30 @@ def run_stage2(
             continue
 
         # ----------------------------------------------------
+        # Wrong-script filter
+        # ----------------------------------------------------
+
+        if _is_wrong_script(
+            text,
+            detected_language,
+        ):
+
+            dropped_wrong_script += 1
+
+            result.dropped_ranges.append(
+                (start, end)
+            )
+
+            print(
+                "[stage2_asr] Dropping "
+                f"wrong-script hallucination "
+                f"[{start:.2f}-{end:.2f}]: "
+                f"{text[:120]!r}"
+            )
+
+            continue
+
+        # ----------------------------------------------------
         # Confidence
         # ----------------------------------------------------
 
@@ -1182,20 +1499,38 @@ def run_stage2(
             # pass below.
             end = start
 
-        result.segments.append(
-            TranscriptSegment(
-                start=round(
-                    start,
-                    3,
-                ),
-                end=round(
-                    end,
-                    3,
-                ),
-                text=text,
-                confidence=confidence,
+        for (
+            piece_start,
+            piece_end,
+            piece_text,
+            piece_confidence,
+        ) in _split_on_internal_pauses(
+            entry.get("tokens", []),
+            start,
+            end,
+            text,
+            confidence,
+        ):
+
+            result.segments.append(
+                TranscriptSegment(
+                    start=round(
+                        piece_start,
+                        3,
+                    ),
+                    end=round(
+                        piece_end,
+                        3,
+                    ),
+                    text=piece_text,
+                    confidence=piece_confidence,
+                )
             )
-        )
+
+    dropped_segment_repeats = _drop_consecutive_duplicate_segments(
+        result.segments,
+        result.dropped_ranges,
+    )
 
     print(
         "[stage2_asr] Parsed "
@@ -1205,7 +1540,9 @@ def run_stage2(
     print(
         "[stage2_asr] Dropped "
         f"{dropped_empty} empty segment(s), "
-        f"{dropped_repetition} repetition segment(s)."
+        f"{dropped_repetition} repetition segment(s), "
+        f"{dropped_wrong_script} wrong-script segment(s), "
+        f"{dropped_segment_repeats} segment-level repeat(s)."
     )
 
     # ========================================================
@@ -1404,9 +1741,9 @@ def _get_indic_conformer_model():
 
             raise RuntimeError(
                 "IndicConformer requires extra packages "
-                "(torchaudio, onnxruntime, transformers, etc.) "
-                "that aren't installed by default.\n"
-                "Install them using requirements-optional.txt."
+                "(torchaudio, onnxruntime) not present in this "
+                "environment.\n"
+                "Install them with: pip install -r requirements.txt"
             ) from e
 
         print(
@@ -1445,6 +1782,16 @@ def _load_wav_mono_16k_tensor(
     """
     Load WAV once.
 
+    Deliberately reads raw PCM via the stdlib `wave` module rather than
+    torchaudio.load() -- torchaudio >= 2.9 dropped its sox/soundfile
+    decoding backends and now hard-requires the separate `torchcodec`
+    package for load(), which itself needs an ffmpeg build matching the
+    installed torch/torchaudio versions. Pulling in that whole dependency
+    chain just to read the plain 16kHz mono PCM WAV that stage 1 already
+    guarantees is unnecessary fragility. `torchaudio.functional.resample`
+    below still works fine without torchcodec -- it operates purely on
+    tensors and never touches the I/O backends.
+
     Stage 1 normally produces:
 
         16 kHz
@@ -1454,10 +1801,53 @@ def _load_wav_mono_16k_tensor(
     so this should normally require no resampling.
     """
 
-    import torchaudio
+    import numpy as np
 
-    wav, sr = torchaudio.load(
-        wav_path
+    with wave.open(wav_path, "rb") as w:
+
+        n_channels = w.getnchannels()
+        sample_width = w.getsampwidth()
+        sr = w.getframerate()
+        raw = w.readframes(w.getnframes())
+
+    dtype = {
+        1: np.uint8,
+        2: np.int16,
+        4: np.int32,
+    }.get(sample_width)
+
+    if dtype is None:
+
+        raise RuntimeError(
+            f"Unsupported WAV sample width "
+            f"({sample_width} bytes) in {wav_path!r}."
+        )
+
+    samples = np.frombuffer(raw, dtype=dtype)
+
+    if sample_width == 1:
+
+        # 8-bit PCM WAV is unsigned with a 128 midpoint, unlike 16/32-bit.
+        samples = (
+            samples.astype(np.float32) - 128.0
+        ) / 128.0
+
+    else:
+
+        samples = samples.astype(np.float32) / float(
+            2 ** (8 * sample_width - 1)
+        )
+
+    if n_channels > 1:
+
+        samples = samples.reshape(-1, n_channels).T
+
+    else:
+
+        samples = samples.reshape(1, -1)
+
+    wav = torch_mod.from_numpy(
+        samples.copy()
     )
 
     # --------------------------------------------------------
@@ -1477,6 +1867,8 @@ def _load_wav_mono_16k_tensor(
     # --------------------------------------------------------
 
     if sr != 16000:
+
+        import torchaudio
 
         wav = (
             torchaudio.functional.resample(
