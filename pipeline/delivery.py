@@ -31,7 +31,6 @@ from config import (
     VOICEOVER_TIME_STRETCH,
     VOICEOVER_MAX_TEMPO_RATIO,
     VOICEOVER_MAX_DRIFT_SEC,
-    VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
     BURN_IN_ENCODE_PRESET,
 )
 
@@ -1678,13 +1677,32 @@ def build_voiceover_track(
 
                     # Natural, gentle fit to this segment's own slot -- what
                     # we'd use if timing weren't a concern at all.
-                    natural_target = min(
-                        raw_duration * VOICEOVER_MAX_TEMPO_RATIO,
-                        max(
+                    #
+                    # Only pull tempo toward the slot when the raw TTS clip
+                    # would otherwise OVERRUN it (raw_duration > slot) --
+                    # that's the only case that risks desync. When the clip
+                    # is already shorter than its slot, stretching it further
+                    # buys nothing (finishing early is always safe) -- but
+                    # verified on a real job, the old formula forced a
+                    # slowdown up to VOICEOVER_MAX_TEMPO_RATIO on almost
+                    # every such segment regardless of how much shorter it
+                    # was (e.g. a 3s clip in a 10s slot still got stretched
+                    # by the full 20%, for a gap it could never meaningfully
+                    # close). Nearly the whole voiceover track pinned at
+                    # ~1.2x slower, punctuated by occasional 2x catch-up
+                    # bursts once that accumulated drift forced a hard
+                    # compression, is exactly what reads as "speeding up and
+                    # slowing down randomly." Leaving short clips at natural
+                    # pace both sounds right AND accrues less drift in the
+                    # first place, so later segments need fewer/smaller
+                    # catch-up compressions too.
+                    if raw_duration > slot:
+                        natural_target = max(
                             raw_duration / VOICEOVER_MAX_TEMPO_RATIO,
                             slot,
-                        ),
-                    )
+                        )
+                    else:
+                        natural_target = raw_duration
 
                     # Cap on how long THIS segment's audio may run so it
                     # doesn't add more than VOICEOVER_MAX_DRIFT_SEC of new
@@ -1709,16 +1727,30 @@ def build_voiceover_track(
                     # simply much longer than its assigned slot -- the
                     # important part is that this doesn't compound into every
                     # later segment too, which the cap above prevents).
+                    #
+                    # This used to allow a separate, more aggressive ceiling
+                    # here specifically for drift catch-up (previously up to
+                    # 2x speed) -- verified on a real job that this is exactly
+                    # what read as "the audio speeding up randomly": a mostly
+                    # gently-paced track with occasional jarring double-speed
+                    # bursts. Using the same VOICEOVER_MAX_TEMPO_RATIO as
+                    # every other segment keeps pace within one consistent
+                    # +/-20% band throughout, at the cost of drift being able
+                    # to exceed VOICEOVER_MAX_DRIFT_SEC by more than before in
+                    # the rare case a segment's content is far longer than its
+                    # slot -- an accepted trade-off now that burned-in
+                    # captions are resynced to wherever the audio actually
+                    # lands rather than the original ASR timing.
                     target_duration = max(
                         target_duration,
-                        raw_duration / VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
+                        raw_duration / VOICEOVER_MAX_TEMPO_RATIO,
                     )
 
                     # target_duration is already bounded (by construction above)
-                    # to raw_duration * [1/VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
+                    # to raw_duration * [1/VOICEOVER_MAX_TEMPO_RATIO,
                     # VOICEOVER_MAX_TEMPO_RATIO], so the implied ratio can never
-                    # exceed the catch-up ratio -- pass it as the outer safety
-                    # bound rather than recomputing a tighter one here.
+                    # exceed that bound -- pass it as the outer safety bound
+                    # rather than recomputing a tighter one here.
                     fitted = os.path.join(
                         tts_dir,
                         f"seg_{seg.index:05d}_fit.wav",
@@ -1729,7 +1761,7 @@ def build_voiceover_track(
                             seg_wav,
                             fitted,
                             target_duration,
-                            VOICEOVER_CATCHUP_MAX_TEMPO_RATIO,
+                            VOICEOVER_MAX_TEMPO_RATIO,
                         )
                     )
 

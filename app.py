@@ -257,12 +257,12 @@ def upload():
     asr_engine = (
         request.form.get(
             "asr_engine",
-            "whisper",
+            "indic_conformer",
         )
     )
 
     if asr_engine not in ASR_ENGINE_CHOICES:
-        asr_engine = "whisper"
+        asr_engine = "indic_conformer"
 
     tts_speaker = (
         request.form.get(

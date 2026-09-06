@@ -298,30 +298,20 @@ def _find_subtitle_pdf_font() -> Optional[str]:
         except OSError:
             continue
 
-    # Third: any Noto Sans font.
-    for directory in font_dirs:
-        if not os.path.isdir(directory):
-            continue
-
-        try:
-            for root, _, files in os.walk(directory):
-                for filename in files:
-                    lower = filename.lower()
-
-                    if (
-                        lower.startswith("notosans")
-                        and lower.endswith(".ttf")
-                    ):
-                        path = os.path.join(root, filename)
-
-                        log.warning(
-                            "Using generic Noto font for subtitle PDF: %s",
-                            path,
-                        )
-                        return path
-
-        except OSError:
-            continue
+    # NOTE: there used to be a third tier here matching *any*
+    # "notosans*.ttf" file recursively. Removed -- verified directly that
+    # it's actively dangerous, not just imprecise: on a real machine with
+    # no Devanagari-capable font installed, it matched
+    # "NotoSansLepcha-Regular.ttf" (a real font, for the Lepcha script
+    # used in Sikkim -- nothing to do with Hindi/Marathi) ahead of the
+    # DejaVu/Arial Unicode fallback below, and reportlab silently
+    # rendered a completely blank page for it -- no error, no missing-
+    # glyph boxes, just empty subtitle PDFs shipped with no indication
+    # anything was wrong. Tier 1 above already covers the one legitimate
+    # generic case ("NotoSans-Regular.ttf", in `preferred_names`) and
+    # tier 2 already covers any correctly-named Devanagari variant --
+    # this tier only ever added the risk of a wrong-script silent match
+    # for no real coverage it didn't already provide.
 
     # Final fallback.
     for directory in font_dirs:
@@ -728,7 +718,7 @@ def run_job(
     want_voiceover: bool,
     progress_cb: Optional[Callable] = None,
     engine_override: str = "auto",
-    asr_engine: str = "whisper",
+    asr_engine: str = "indic_conformer",
     tts_speaker: Optional[str] = None,
 ) -> dict:
     """
@@ -804,7 +794,7 @@ def _run_job(
     want_voiceover: bool,
     progress_cb: Optional[Callable] = None,
     engine_override: str = "auto",
-    asr_engine: str = "whisper",
+    asr_engine: str = "indic_conformer",
     tts_speaker: Optional[str] = None,
 ) -> dict:
 
@@ -977,6 +967,8 @@ def _run_job(
     # Optional IndicConformer refinement
     # ========================================================
 
+    indic_conformer_warning = None
+
     if asr_engine == "indic_conformer":
 
         _progress(
@@ -986,18 +978,41 @@ def _run_job(
             30,
         )
 
-        with _Stage(
-            timings,
-            "asr_refine_indic_conformer",
-        ):
+        try:
 
-            asr_segments = (
-                stage2_asr
-                .refine_segments_with_indic_conformer(
-                    asr_segments,
-                    pre.audio_wav_path,
-                    source_lang,
+            with _Stage(
+                timings,
+                "asr_refine_indic_conformer",
+            ):
+
+                asr_segments = (
+                    stage2_asr
+                    .refine_segments_with_indic_conformer(
+                        asr_segments,
+                        pre.audio_wav_path,
+                        source_lang,
+                    )
                 )
+
+        except Exception as exc:
+
+            # IndicConformer is a refinement on top of an already-usable
+            # whisper.cpp transcript, not a hard requirement -- a failure
+            # here (missing optional deps, no HF access to the gated
+            # checkpoint yet, an OOM on a memory-constrained machine, a
+            # network hiccup on first download, etc.) shouldn't discard a
+            # perfectly good whisper transcript and roll back the whole
+            # job. Fall back to it and surface why in the job report,
+            # the same way a missing voiceover-language mapping degrades
+            # to subtitles-only instead of failing outright.
+            log.warning(
+                f"Job {job_id}: IndicConformer refinement failed, "
+                f"falling back to the whisper.cpp transcript -- {exc}"
+            )
+
+            indic_conformer_warning = (
+                "IndicConformer refinement was requested but failed "
+                f"({exc}); used the whisper.cpp transcript instead."
             )
 
     # ========================================================
@@ -1306,6 +1321,18 @@ def _run_job(
 
         "warnings": [],
     }
+
+    # ========================================================
+    # IndicConformer refinement fallback
+    # ========================================================
+
+    if indic_conformer_warning:
+
+        quality_info[
+            "warnings"
+        ].append(
+            indic_conformer_warning
+        )
 
     # ========================================================
     # ASR dropped ranges

@@ -77,26 +77,60 @@ def _ffmpeg_has_subtitles_filter(ffmpeg_path: str) -> bool:
         return False
 
 
-def _resolve_ffmpeg_binary(env_var: str, preexisting_system_binary, fallback: str) -> str:
+def _homebrew_ffmpeg_full_candidate(binary_name: str):
+    # On macOS, Homebrew's plain `ffmpeg` formula does NOT link libass at
+    # all (confirmed via its own formula: libass isn't in its dependency
+    # list) -- subtitle-filter support only ships in the separate
+    # `ffmpeg-full` formula, which pulls in libass 0.17+ but is
+    # deliberately "keg-only" (installed, but not symlinked onto PATH) so
+    # it doesn't collide with the plain `ffmpeg` formula's binaries. That
+    # means a machine can have a fully working, modern-libass ffmpeg
+    # installed and this pipeline would still never find it via PATH
+    # alone. Ask brew directly for that keg's location rather than
+    # requiring an operator to set FFMPEG_BINARY by hand.
+    import subprocess
+    try:
+        proc = subprocess.run(
+            ["brew", "--prefix", "ffmpeg-full"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode != 0:
+            return None
+        candidate = os.path.join(proc.stdout.strip(), "bin", binary_name)
+        return candidate if os.path.exists(candidate) else None
+    except Exception:
+        # `brew` not installed/on PATH (e.g. Linux/Docker, where
+        # FFMPEG_BINARY is set explicitly anyway) -- not an error.
+        return None
+
+
+def _resolve_ffmpeg_binary(env_var: str, preexisting_system_binary, binary_name: str, fallback: str) -> str:
     # Explicit env var always wins -- assume the operator verified it.
-    # Otherwise, prefer a system binary that was already on PATH before
-    # static-ffmpeg's bundled one got added, but only if it actually
-    # supports burning in subtitles at all; a system ffmpeg without libass
-    # compiled in would make every burn-in job fail outright, which is
-    # worse than static-ffmpeg's known-imperfect-but-functional libass
-    # 0.15.2. Falls back to the bundled build otherwise.
+    # Otherwise, try candidates in order of "most likely to already be a
+    # good, already-installed ffmpeg" and take the first one that
+    # actually supports burning in subtitles at all; a candidate without
+    # libass compiled in would make every burn-in job fail outright,
+    # which is worse than static-ffmpeg's known-imperfect-but-functional
+    # libass 0.15.2. Falls back to the bundled static-ffmpeg build if
+    # nothing better checks out.
     env_value = os.environ.get(env_var)
     if env_value:
         return env_value
 
-    if preexisting_system_binary and _ffmpeg_has_subtitles_filter(preexisting_system_binary):
-        return preexisting_system_binary
+    for candidate in (
+        preexisting_system_binary,
+        _homebrew_ffmpeg_full_candidate(binary_name),
+    ):
+        if candidate and _ffmpeg_has_subtitles_filter(candidate):
+            return candidate
 
     return fallback
 
 
-FFMPEG_BINARY = _resolve_ffmpeg_binary("FFMPEG_BINARY", _preexisting_system_ffmpeg, "ffmpeg")
-FFPROBE_BINARY = _resolve_ffmpeg_binary("FFPROBE_BINARY", _preexisting_system_ffprobe, "ffprobe")
+FFMPEG_BINARY = _resolve_ffmpeg_binary("FFMPEG_BINARY", _preexisting_system_ffmpeg, "ffmpeg", "ffmpeg")
+FFPROBE_BINARY = _resolve_ffmpeg_binary("FFPROBE_BINARY", _preexisting_system_ffprobe, "ffprobe", "ffprobe")
 if FFMPEG_BINARY == "ffmpeg":
     print("[config] Using the auto-provisioned static-ffmpeg binary -- its bundled "
           "libass (0.15.2) mis-renders complex scripts (Devanagari/Thai/Arabic) in "
@@ -244,6 +278,54 @@ TRANSLATION_NUM_BEAMS = int(
     )
 )
 
+# ---------- Memory bound: resident IndicTrans2 checkpoints ----------
+# pipeline/translate.py caches each loaded IndicTrans2 checkpoint
+# (en_indic / indic_en / indic_indic -- up to 3 distinct models, each
+# several hundred MB to ~1GB+ depending on INDICTRANS2_MODEL_SIZE) in a
+# module-level dict, keyed by model name, with no eviction. A long-running
+# deployment (this process staying up across many jobs -- the actual
+# field-use pattern, not a one-shot script) that happens to serve more
+# than one direction over its lifetime would accumulate all of them
+# resident at once, on top of whatever NLLB/whisper.cpp/Indic-TTS are
+# using at the time. This bound exists so that ceiling is a config value
+# to tune, not a silent accumulation to discover via an OOM kill in the
+# field. 1 means only the checkpoint the most recent job actually needed
+# stays loaded; raise it if a deployment's RAM headroom and job mix (e.g.
+# frequently alternating target languages that hit different
+# checkpoints) make reload cost a worse trade-off than the extra memory.
+INDICTRANS2_MAX_RESIDENT_MODELS = int(
+    os.environ.get(
+        "INDICTRANS2_MAX_RESIDENT_MODELS",
+        "1",
+    )
+)
+
+# ---------- Memory bound: sharing one budget across IndicTrans2 + NLLB ----------
+# The bound above only governs IndicTrans2-vs-IndicTrans2 (e.g. an
+# en_indic checkpoint evicting to make room for indic_indic). It does
+# nothing about IndicTrans2 vs. NLLB, which are two entirely separate
+# caches in pipeline/translate.py -- a session that runs an Indic-pair
+# job (loading IndicTrans2) and then a non-Indic-pair job (loading NLLB)
+# would keep BOTH resident, even though no single translation call ever
+# needs both at once (routing picks exactly one engine per language
+# pair). Verified directly under a real 8GB memory limit (Docker,
+# --memory=8g): with INDICTRANS2_MAX_RESIDENT_MODELS=1 already active
+# and correctly bounding the IndicTrans2 side, loading NLLB on top of an
+# already-resident IndicTrans2 checkpoint (~1.8GB RSS at that point)
+# still triggered an OOM kill (exit code 137) during NLLB's load/
+# quantization step. Default on: evicts whichever engine's cache isn't
+# the one about to be used. Turn off only for a deployment with enough
+# headroom that avoiding reload cost across a mixed workload is worth
+# more than the memory -- untested above 8GB, no specific number to
+# recommend yet.
+TRANSLATION_SHARE_MEMORY_ACROSS_ENGINES = (
+    os.environ.get(
+        "TRANSLATION_SHARE_MEMORY_ACROSS_ENGINES",
+        "true",
+    ).lower()
+    not in ("false", "0", "")
+)
+
 # ---------- Optional: IndicConformer ASR (off by default) ----------
 # MIT licensed, not gated. Whole-buffer transcription only -- no built-in
 # segmentation/timestamps -- so it is used as an optional per-segment TEXT
@@ -313,47 +395,31 @@ VOICEOVER_MAX_TEMPO_RATIO = 1.2   # clamp; within native atempo range (0.5-2.0),
 # against original timing) was verified against a real job to cause several
 # seconds of audio/video desync within any run of tightly-packed segments --
 # reported as "the screen moves onto another frame but the output audio is
-# still of the previous frame". VOICEOVER_MAX_DRIFT_SEC bounds this: once a
-# segment's earliest possible start (after the previous segment) has
+# still of the previous frame". VOICEOVER_MAX_DRIFT_SEC is the target: once
+# a segment's earliest possible start (after the previous segment) has
 # drifted more than this far from its own original subtitle start, that
-# segment gets compressed harder -- up to VOICEOVER_CATCHUP_MAX_TEMPO_RATIO
-# -- specifically to pull the timeline back within budget, instead of
-# letting drift keep compounding.
+# segment gets compressed harder to try to pull the timeline back within
+# budget, instead of letting drift keep compounding.
 #
-# VOICEOVER_CATCHUP_MAX_TEMPO_RATIO was briefly narrowed from 1.6 to 1.3 to
-# make catch-up bursts sound less jarring. That was a mistake: this ratio
-# isn't just a naturalness knob, it's what makes the VOICEOVER_MAX_DRIFT_SEC
-# guarantee actually hold -- when a segment needs more compression than the
-# ceiling allows to stay in budget, the code intentionally lets it exceed
-# the drift cap rather than distort the audio further (see the "physical
-# intelligibility floor" comment in delivery.py). Weakening the ceiling to
-# 1.3 therefore weakened the sync guarantee itself, not just pacing --
-# verified on a real job: max drift went from ~1.5s to 13.7s. Reverted to
-# 1.6 (the value actually validated to keep drift bounded). The zero-
-# duration-segment bug in stage2_asr.py that was injecting most of the
-# drift bursts in the first place is now fixed at its source, which should
-# also mean the 1.6 ceiling gets invoked less often than before -- i.e.
-# smoother pacing AND bounded sync, rather than trading one for the other.
-#
-# That held for the systemic (12-occurrence) zero-duration case, but a real
-# job still showed 6.35s of drift afterward -- traced to a different,
-# rarer failure mode: whisper.cpp assigning a segment a slot wildly too
-# short for its actual content (one case: a 128-char sentence, ~10.8s of
-# real TTS speech, given only a 0.84s window) with almost no room before
-# the next segment's own start -- not enough runway for any tempo
-# compression, however aggressive, to fully absorb. stage2_asr.py now
-# extends such segments' timing where there's room to (capped at the next
-# segment's start, never creating an overlap), which helps the common
-# case; for the genuinely pathological case above there wasn't enough room
-# regardless. Raised the ceiling to 2.0 -- the native atempo range's own
-# limit (see _build_atempo_chain), so this still never triggers filter
-# chaining/its extra quality loss -- and tightened the drift budget to 1.0s,
-# which together brought that same job's worst-case drift down from 6.35s
-# to ~4.55s. Not a full elimination of every possible case (that would need
-# smarter multi-segment lookahead scheduling, a bigger change), but a large,
-# measured improvement, and the common/systemic causes are now gone.
+# This used to escalate to a separate, more aggressive
+# VOICEOVER_CATCHUP_MAX_TEMPO_RATIO (previously as high as 2.0, i.e. double
+# speed) specifically for that catch-up case. Verified against a real job
+# that this reads as "the audio speeding up randomly" -- most segments play
+# at a gentle, consistent pace, then an occasional segment is compressed
+# to 2x speed to claw back drift, which is far more jarring than the drift
+# itself. Removed that separate ceiling: catch-up compression is now capped
+# at the exact same VOICEOVER_MAX_TEMPO_RATIO used everywhere else, so
+# pace never varies by more than the same +/-20% band throughout the whole
+# track. The trade-off (see the "physical intelligibility floor" comment in
+# delivery.py) is that when a segment's content is far longer than its slot
+# plus the drift budget combined, the gentler cap can't claw back enough,
+# so drift in that pathological case can now exceed VOICEOVER_MAX_DRIFT_SEC
+# by more than it used to -- accepted deliberately, since consistent pace
+# was the priority once burned-in captions were resynced to wherever the
+# dubbed audio actually lands (see orchestrator.py's
+# _write_voiceover_synced_srt) rather than the original ASR timing, which
+# was the main casualty of that drift previously.
 VOICEOVER_MAX_DRIFT_SEC = 1.0
-VOICEOVER_CATCHUP_MAX_TEMPO_RATIO = 2.0   # only used while actively catching up drift; native atempo ceiling
 
 # ---------- Stage 4 — Subtitle Generation ----------
 MAX_CHARS_PER_LINE = 42

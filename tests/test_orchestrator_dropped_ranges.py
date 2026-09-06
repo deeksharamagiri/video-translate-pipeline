@@ -65,7 +65,9 @@ def test_run_job_surfaces_asr_dropped_ranges_as_a_warning(monkeypatch, tmp_path)
     input_file = tmp_path / "input.mp4"
     input_file.write_bytes(b"fake video")
 
-    result = orchestrator.run_job(str(input_file), None, "hin", False, False)
+    result = orchestrator.run_job(
+        str(input_file), None, "hin", False, False, asr_engine="whisper"
+    )
 
     warnings = result["quality"]["warnings"]
     assert len(warnings) == 1
@@ -149,7 +151,9 @@ def test_run_job_preserves_asr_dropped_warning_when_voiceover_also_runs(
     input_file = tmp_path / "input.mp4"
     input_file.write_bytes(b"fake video")
 
-    result = orchestrator.run_job(str(input_file), None, "hin", False, True)
+    result = orchestrator.run_job(
+        str(input_file), None, "hin", False, True, asr_engine="whisper"
+    )
 
     warnings = result["quality"]["warnings"]
     assert any("60s of audio" in w for w in warnings), (

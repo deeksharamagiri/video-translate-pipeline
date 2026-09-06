@@ -11,6 +11,17 @@ ffmpeg-python==0.2.0
 # Stage 2 - ASR
 # whisper.cpp does the actual transcription, as a separate `whisper-cli`
 # binary invoked via subprocess (not a pip package -- see README "Setup").
+#
+# IndicConformer refinement (asr_engine=indic_conformer, default) -- verified
+# directly on real rural/dialectal Marathi field audio to fix whisper.cpp
+# mis-transcriptions that were the root cause of "nonsensical translation"
+# complaints (e.g. whisper.cpp consistently misheard "शेळी"/goat as "शेल"
+# across an entire video; IndicConformer, trained specifically on Indian
+# languages, got it right). Falls back to the whisper.cpp transcript alone
+# if these aren't installed or the gated checkpoint isn't accessible yet --
+# see README "The one manual step" for IndicConformer's own HF gating.
+torchaudio
+onnxruntime
 
 # Stage 3/4 - Translation + subtitles
 # (sqlite3 is stdlib, no install needed)
@@ -31,13 +42,11 @@ IndicTransToolkit==1.1.1
 
 # Reports
 python-docx==1.1.2
+reportlab==5.0.1
 
 # Utilities
 numpy==1.26.4
 tqdm==4.66.4
 certifi
 
-# Optional features need extra packages not installed by default -- see
-# requirements-optional.txt. The app boots and runs subtitle/burned-in jobs
-# fine without it; asr_engine=indic_conformer requires installing that file
-# first. Voiceover (Indic-TTS) needs a SEPARATE venv -- see tts_worker/.
+# Voiceover (Indic-TTS) needs a SEPARATE venv -- see tts_worker/.
