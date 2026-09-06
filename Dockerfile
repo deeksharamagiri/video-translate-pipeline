@@ -45,12 +45,22 @@ FROM python:3.12-slim-bookworm AS app
 # 5.1.9 linked against libass 1:0.17.1, which fixes the complex-script
 # (Devanagari/Thai/Arabic) subtitle-shaping bug present in static-ffmpeg's
 # bundled libass 0.15.2 (see config.py's FFMPEG_BINARY comments).
+# fonts-noto-core provides /usr/share/fonts/truetype/noto/NotoSansDevanagari-
+# Regular.ttf -- verified directly (a fresh debian:bookworm-slim image has
+# NO fonts installed at all otherwise, which would make subtitle PDF
+# generation either crash outright or, worse, silently pick whatever
+# non-Devanagari font happens to be present and render blank/wrong-script
+# pages with no error -- see pipeline/orchestrator.py's
+# _find_subtitle_pdf_font()). The installed filename exactly matches that
+# function's first, most-preferred exact-name match, so no extra config is
+# needed here beyond having the package present.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         libsndfile1 \
         ca-certificates \
         libgomp1 \
         libstdc++6 \
+        fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Point explicitly at the just-installed system binaries (standard Debian

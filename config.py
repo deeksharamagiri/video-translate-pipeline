@@ -77,26 +77,60 @@ def _ffmpeg_has_subtitles_filter(ffmpeg_path: str) -> bool:
         return False
 
 
-def _resolve_ffmpeg_binary(env_var: str, preexisting_system_binary, fallback: str) -> str:
+def _homebrew_ffmpeg_full_candidate(binary_name: str):
+    # On macOS, Homebrew's plain `ffmpeg` formula does NOT link libass at
+    # all (confirmed via its own formula: libass isn't in its dependency
+    # list) -- subtitle-filter support only ships in the separate
+    # `ffmpeg-full` formula, which pulls in libass 0.17+ but is
+    # deliberately "keg-only" (installed, but not symlinked onto PATH) so
+    # it doesn't collide with the plain `ffmpeg` formula's binaries. That
+    # means a machine can have a fully working, modern-libass ffmpeg
+    # installed and this pipeline would still never find it via PATH
+    # alone. Ask brew directly for that keg's location rather than
+    # requiring an operator to set FFMPEG_BINARY by hand.
+    import subprocess
+    try:
+        proc = subprocess.run(
+            ["brew", "--prefix", "ffmpeg-full"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode != 0:
+            return None
+        candidate = os.path.join(proc.stdout.strip(), "bin", binary_name)
+        return candidate if os.path.exists(candidate) else None
+    except Exception:
+        # `brew` not installed/on PATH (e.g. Linux/Docker, where
+        # FFMPEG_BINARY is set explicitly anyway) -- not an error.
+        return None
+
+
+def _resolve_ffmpeg_binary(env_var: str, preexisting_system_binary, binary_name: str, fallback: str) -> str:
     # Explicit env var always wins -- assume the operator verified it.
-    # Otherwise, prefer a system binary that was already on PATH before
-    # static-ffmpeg's bundled one got added, but only if it actually
-    # supports burning in subtitles at all; a system ffmpeg without libass
-    # compiled in would make every burn-in job fail outright, which is
-    # worse than static-ffmpeg's known-imperfect-but-functional libass
-    # 0.15.2. Falls back to the bundled build otherwise.
+    # Otherwise, try candidates in order of "most likely to already be a
+    # good, already-installed ffmpeg" and take the first one that
+    # actually supports burning in subtitles at all; a candidate without
+    # libass compiled in would make every burn-in job fail outright,
+    # which is worse than static-ffmpeg's known-imperfect-but-functional
+    # libass 0.15.2. Falls back to the bundled static-ffmpeg build if
+    # nothing better checks out.
     env_value = os.environ.get(env_var)
     if env_value:
         return env_value
 
-    if preexisting_system_binary and _ffmpeg_has_subtitles_filter(preexisting_system_binary):
-        return preexisting_system_binary
+    for candidate in (
+        preexisting_system_binary,
+        _homebrew_ffmpeg_full_candidate(binary_name),
+    ):
+        if candidate and _ffmpeg_has_subtitles_filter(candidate):
+            return candidate
 
     return fallback
 
 
-FFMPEG_BINARY = _resolve_ffmpeg_binary("FFMPEG_BINARY", _preexisting_system_ffmpeg, "ffmpeg")
-FFPROBE_BINARY = _resolve_ffmpeg_binary("FFPROBE_BINARY", _preexisting_system_ffprobe, "ffprobe")
+FFMPEG_BINARY = _resolve_ffmpeg_binary("FFMPEG_BINARY", _preexisting_system_ffmpeg, "ffmpeg", "ffmpeg")
+FFPROBE_BINARY = _resolve_ffmpeg_binary("FFPROBE_BINARY", _preexisting_system_ffprobe, "ffprobe", "ffprobe")
 if FFMPEG_BINARY == "ffmpeg":
     print("[config] Using the auto-provisioned static-ffmpeg binary -- its bundled "
           "libass (0.15.2) mis-renders complex scripts (Devanagari/Thai/Arabic) in "
