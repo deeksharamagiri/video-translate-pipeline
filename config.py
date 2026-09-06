@@ -278,6 +278,54 @@ TRANSLATION_NUM_BEAMS = int(
     )
 )
 
+# ---------- Memory bound: resident IndicTrans2 checkpoints ----------
+# pipeline/translate.py caches each loaded IndicTrans2 checkpoint
+# (en_indic / indic_en / indic_indic -- up to 3 distinct models, each
+# several hundred MB to ~1GB+ depending on INDICTRANS2_MODEL_SIZE) in a
+# module-level dict, keyed by model name, with no eviction. A long-running
+# deployment (this process staying up across many jobs -- the actual
+# field-use pattern, not a one-shot script) that happens to serve more
+# than one direction over its lifetime would accumulate all of them
+# resident at once, on top of whatever NLLB/whisper.cpp/Indic-TTS are
+# using at the time. This bound exists so that ceiling is a config value
+# to tune, not a silent accumulation to discover via an OOM kill in the
+# field. 1 means only the checkpoint the most recent job actually needed
+# stays loaded; raise it if a deployment's RAM headroom and job mix (e.g.
+# frequently alternating target languages that hit different
+# checkpoints) make reload cost a worse trade-off than the extra memory.
+INDICTRANS2_MAX_RESIDENT_MODELS = int(
+    os.environ.get(
+        "INDICTRANS2_MAX_RESIDENT_MODELS",
+        "1",
+    )
+)
+
+# ---------- Memory bound: sharing one budget across IndicTrans2 + NLLB ----------
+# The bound above only governs IndicTrans2-vs-IndicTrans2 (e.g. an
+# en_indic checkpoint evicting to make room for indic_indic). It does
+# nothing about IndicTrans2 vs. NLLB, which are two entirely separate
+# caches in pipeline/translate.py -- a session that runs an Indic-pair
+# job (loading IndicTrans2) and then a non-Indic-pair job (loading NLLB)
+# would keep BOTH resident, even though no single translation call ever
+# needs both at once (routing picks exactly one engine per language
+# pair). Verified directly under a real 8GB memory limit (Docker,
+# --memory=8g): with INDICTRANS2_MAX_RESIDENT_MODELS=1 already active
+# and correctly bounding the IndicTrans2 side, loading NLLB on top of an
+# already-resident IndicTrans2 checkpoint (~1.8GB RSS at that point)
+# still triggered an OOM kill (exit code 137) during NLLB's load/
+# quantization step. Default on: evicts whichever engine's cache isn't
+# the one about to be used. Turn off only for a deployment with enough
+# headroom that avoiding reload cost across a mixed workload is worth
+# more than the memory -- untested above 8GB, no specific number to
+# recommend yet.
+TRANSLATION_SHARE_MEMORY_ACROSS_ENGINES = (
+    os.environ.get(
+        "TRANSLATION_SHARE_MEMORY_ACROSS_ENGINES",
+        "true",
+    ).lower()
+    not in ("false", "0", "")
+)
+
 # ---------- Optional: IndicConformer ASR (off by default) ----------
 # MIT licensed, not gated. Whole-buffer transcription only -- no built-in
 # segmentation/timestamps -- so it is used as an optional per-segment TEXT

@@ -14,9 +14,14 @@ from typing import Callable, List, Optional
 from config import (
     INDIC_LANGS, INDICTRANS2_MODELS, INDICTRANS2_MODEL_SIZE, NLLB_MODEL,
     GLOSSARY_PATH, QUANTIZE_TRANSLATION_MODELS, TRANSLATION_NUM_BEAMS,
+    INDICTRANS2_MAX_RESIDENT_MODELS, TRANSLATION_SHARE_MEMORY_ACROSS_ENGINES,
 )
 
-_indictrans_cache = {}      # model_name -> {"model":, "tokenizer":}
+# model_name -> {"model":, "tokenizer":}. Ordering doubles as recency:
+# re-inserting a key on cache hit (see _get_indictrans_model) moves it to
+# the end, so the first key is always the least-recently-used one --
+# bounded to INDICTRANS2_MAX_RESIDENT_MODELS entries, see config.py.
+_indictrans_cache = {}
 _indictrans_processor = {}  # lazy-init once, shared across checkpoints
 _nllb_cache = {}
 
@@ -135,12 +140,80 @@ def _maybe_quantize(model):
     return quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
 
 
+def _evict_nllb_for_memory():
+    # See TRANSLATION_SHARE_MEMORY_ACROSS_ENGINES in config.py -- called
+    # before loading an IndicTrans2 checkpoint, so a resident NLLB model
+    # left over from an earlier, differently-shaped job doesn't sit
+    # alongside it against a shared memory budget.
+    if not TRANSLATION_SHARE_MEMORY_ACROSS_ENGINES:
+        return
+    if "model" in _nllb_cache:
+        del _nllb_cache["model"]
+        del _nllb_cache["tokenizer"]
+        import gc
+        gc.collect()
+        print(
+            "[translate] Evicted NLLB model to make room for an "
+            "IndicTrans2 checkpoint."
+        )
+
+
+def _evict_indictrans_for_memory():
+    # The other direction of the same policy -- called before loading
+    # NLLB. Verified directly under a real 8GB memory limit: loading NLLB
+    # on top of an already-resident IndicTrans2 checkpoint (with
+    # INDICTRANS2_MAX_RESIDENT_MODELS already correctly bounding the
+    # IndicTrans2 side to 1) still triggered an OOM kill during NLLB's
+    # load/quantization step -- the two caches were evicting
+    # independently rather than sharing one budget.
+    if not TRANSLATION_SHARE_MEMORY_ACROSS_ENGINES:
+        return
+    while _indictrans_cache:
+        name = next(iter(_indictrans_cache))
+        evicted = _indictrans_cache.pop(name)
+        del evicted["model"]
+        del evicted["tokenizer"]
+        import gc
+        gc.collect()
+        print(
+            f"[translate] Evicted IndicTrans2 checkpoint {name!r} "
+            "to make room for NLLB."
+        )
+
+
 # ---------------------------------------------------------------- IndicTrans2
+def _evict_lru_indictrans_models():
+    # Evict least-recently-used checkpoints down to
+    # INDICTRANS2_MAX_RESIDENT_MODELS - 1, making room for the one about
+    # to be loaded. Dict insertion order is the recency signal: cache
+    # hits re-insert their key (see below), so the least-recently-used
+    # entry is always whichever key comes first.
+    while len(_indictrans_cache) > max(0, INDICTRANS2_MAX_RESIDENT_MODELS - 1):
+        lru_name = next(iter(_indictrans_cache))
+        evicted = _indictrans_cache.pop(lru_name)
+        # Drop references explicitly (not just letting the dict entry go
+        # out of scope) so the large tensors are eligible for collection
+        # as soon as possible, rather than whenever this frame's locals
+        # happen to get cleaned up.
+        del evicted["model"]
+        del evicted["tokenizer"]
+        import gc
+        gc.collect()
+        print(
+            f"[translate] Evicted IndicTrans2 checkpoint "
+            f"'{lru_name}' to stay within "
+            f"INDICTRANS2_MAX_RESIDENT_MODELS="
+            f"{INDICTRANS2_MAX_RESIDENT_MODELS}."
+        )
+
+
 def _get_indictrans_model(model_name: str):
     if model_name not in _indictrans_cache:
         import torch
         from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
         from IndicTransToolkit.processor import IndicProcessor
+
+        _evict_nllb_for_memory()
 
         try:
             tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -156,10 +229,17 @@ def _get_indictrans_model(model_name: str):
             ) from e
         model.eval()
         model = _maybe_quantize(model)
+        _evict_lru_indictrans_models()
         _indictrans_cache[model_name] = {"model": model, "tokenizer": tokenizer}
         if "processor" not in _indictrans_processor:
             _indictrans_processor["processor"] = IndicProcessor(inference=True)
             _indictrans_processor["torch"] = torch
+    else:
+        # Cache hit -- move this entry to the end so it's treated as
+        # most-recently-used (re-inserting an existing key updates its
+        # position without changing its value).
+        _indictrans_cache[model_name] = _indictrans_cache.pop(model_name)
+
     entry = _indictrans_cache[model_name]
     return (entry["model"], entry["tokenizer"],
             _indictrans_processor["processor"], _indictrans_processor["torch"])
@@ -198,6 +278,9 @@ def translate_with_indictrans2(texts: List[str], source_lang: str, target_lang: 
 def _get_nllb_model():
     if "model" not in _nllb_cache:
         from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+        _evict_indictrans_for_memory()
+
         tokenizer = AutoTokenizer.from_pretrained(NLLB_MODEL)
         model = AutoModelForSeq2SeqLM.from_pretrained(NLLB_MODEL)
         model.eval()
