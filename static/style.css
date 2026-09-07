@@ -315,6 +315,16 @@ main:has(#resultsPanel:not([hidden])) .step[data-step="3"] .step-label { color: 
 .btn-primary:active:not(:disabled) { transform: translateY(0) scale(0.99); }
 .btn-primary:disabled { background: #DDD2BB; color: #9A8F78; cursor: not-allowed; box-shadow: none; }
 
+.run-row { display: flex; align-items: stretch; gap: 10px; }
+.run-row .btn-primary { flex: 1 1 auto; }
+.btn-cancel {
+  flex: 0 0 auto; background: none; border: 1px solid var(--panel-border); color: var(--dim);
+  border-radius: 10px; padding: 0 18px; cursor: pointer; font-size: 14px; font-weight: 600;
+  font-family: var(--sans); transition: all 0.2s var(--ease);
+}
+.btn-cancel:hover:not(:disabled) { color: var(--red); border-color: var(--red); background: rgba(179,70,47,0.08); }
+.btn-cancel:disabled { cursor: not-allowed; opacity: 0.6; }
+
 .error {
   color: var(--red); font-family: var(--sans); font-size: 13px; margin-top: 10px;
   animation: popIn 0.25s var(--ease);

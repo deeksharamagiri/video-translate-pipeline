@@ -100,17 +100,20 @@
       </select>
     </label>
 
-    <button id="submitBtn" class="btn-primary" disabled>
-      <span class="btn-idle"><span class="btn-icon">🚜</span> Run Pipeline</span>
-      <span class="btn-processing">
-        <span class="btn-processing-top">
-          <span class="spinner" aria-hidden="true"></span>
-          <span class="btn-progress-msg" id="progressMsg">Waiting...</span>
-          <span class="btn-progress-pct" id="progressPct">0%</span>
+    <div class="run-row">
+      <button id="submitBtn" class="btn-primary" disabled>
+        <span class="btn-idle"><span class="btn-icon">🚜</span> Run Pipeline</span>
+        <span class="btn-processing">
+          <span class="btn-processing-top">
+            <span class="spinner" aria-hidden="true"></span>
+            <span class="btn-progress-msg" id="progressMsg">Waiting...</span>
+            <span class="btn-progress-pct" id="progressPct">0%</span>
+          </span>
+          <span class="btn-progress-track"><span class="btn-progress-fill" id="progressBarInner"></span></span>
         </span>
-        <span class="btn-progress-track"><span class="btn-progress-fill" id="progressBarInner"></span></span>
-      </span>
-    </button>
+      </button>
+      <button id="cancelBtn" class="btn-cancel" type="button" hidden>✕ Cancel</button>
+    </div>
     <p class="error" id="formError" hidden></p>
   </section>
 

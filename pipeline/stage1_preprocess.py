@@ -16,6 +16,7 @@ import wave
 import numpy as np
 
 from config import TARGET_SAMPLE_RATE, SNR_DENOISE_THRESHOLD_DB, FFMPEG_BINARY, FFPROBE_BINARY
+from pipeline.cancellation import run_cancellable
 
 
 class PreprocessResult:
@@ -40,9 +41,9 @@ class PreprocessResult:
         }
 
 
-def _run(cmd):
+def _run(cmd, cancel_event=None):
     """Run a subprocess command, raise with stderr on failure."""
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = run_cancellable(cmd, cancel_event)
     if proc.returncode != 0:
         raise RuntimeError(
             f"Command failed ({' '.join(cmd)}):\n{proc.stderr.decode(errors='ignore')}"
@@ -50,12 +51,12 @@ def _run(cmd):
     return proc.stdout.decode(errors="ignore")
 
 
-def probe_streams(input_path):
+def probe_streams(input_path, cancel_event=None):
     """Return ffprobe stream info as a list of dicts."""
     out = _run([
         FFPROBE_BINARY, "-v", "quiet", "-print_format", "json",
         "-show_streams", "-show_format", input_path
-    ])
+    ], cancel_event)
     return json.loads(out)
 
 
@@ -67,16 +68,16 @@ def detect_subtitle_stream(streams_info):
     return None
 
 
-def extract_embedded_subtitles(input_path, stream_index, out_srt_path):
+def extract_embedded_subtitles(input_path, stream_index, out_srt_path, cancel_event=None):
     """Pull an embedded subtitle track out to .srt using its own timestamps."""
     _run([
         FFMPEG_BINARY, "-y", "-i", input_path,
         "-map", f"0:{stream_index}", out_srt_path
-    ])
+    ], cancel_event)
     return out_srt_path
 
 
-def extract_audio_to_wav(input_path, out_wav_path, sample_rate=TARGET_SAMPLE_RATE):
+def extract_audio_to_wav(input_path, out_wav_path, sample_rate=TARGET_SAMPLE_RATE, cancel_event=None):
     """Extract + normalise to mono WAV at target sample rate."""
     _run([
         FFMPEG_BINARY, "-y", "-i", input_path,
@@ -85,7 +86,7 @@ def extract_audio_to_wav(input_path, out_wav_path, sample_rate=TARGET_SAMPLE_RAT
         "-ar", str(sample_rate),    # sample rate
         "-acodec", "pcm_s16le",
         out_wav_path
-    ])
+    ], cancel_event)
     return out_wav_path
 
 
@@ -125,22 +126,22 @@ def estimate_snr_db(wav_path):
     return round(snr_db, 2)
 
 
-def apply_denoise(in_wav_path, out_wav_path):
+def apply_denoise(in_wav_path, out_wav_path, cancel_event=None):
     """FFmpeg's afftdn (FFT-based denoiser) — safe default for speech."""
     _run([
         FFMPEG_BINARY, "-y", "-i", in_wav_path,
         "-af", "afftdn=nf=-25",
         out_wav_path
-    ])
+    ], cancel_event)
     return out_wav_path
 
 
-def get_duration_seconds(input_path):
-    info = probe_streams(input_path)
+def get_duration_seconds(input_path, cancel_event=None):
+    info = probe_streams(input_path, cancel_event)
     return float(info.get("format", {}).get("duration", 0.0))
 
 
-def run_stage1(input_path, work_dir, input_kind):
+def run_stage1(input_path, work_dir, input_kind, cancel_event=None):
     """
     Full Stage 1 pipeline.
     input_kind: "video" or "audio" (which top box this came from)
@@ -150,7 +151,7 @@ def run_stage1(input_path, work_dir, input_kind):
     result = PreprocessResult()
     result.input_kind = input_kind
 
-    streams_info = probe_streams(input_path)
+    streams_info = probe_streams(input_path, cancel_event)
 
     # 1. Detect embedded subtitle track (video only — audio files never carry subs)
     sub_stream_idx = None
@@ -160,7 +161,7 @@ def run_stage1(input_path, work_dir, input_kind):
     if sub_stream_idx is not None:
         srt_path = os.path.join(work_dir, "embedded_subs.srt")
         try:
-            extract_embedded_subtitles(input_path, sub_stream_idx, srt_path)
+            extract_embedded_subtitles(input_path, sub_stream_idx, srt_path, cancel_event)
             result.subtitle_track_found = True
             result.subtitle_srt_path = srt_path
         except RuntimeError as e:
@@ -168,7 +169,7 @@ def run_stage1(input_path, work_dir, input_kind):
 
     # 2. Extract audio -> normalise to 16kHz mono WAV
     raw_wav = os.path.join(work_dir, "audio_raw.wav")
-    extract_audio_to_wav(input_path, raw_wav)
+    extract_audio_to_wav(input_path, raw_wav, cancel_event=cancel_event)
 
     # 3. SNR check -> auto-denoise if needed
     snr = estimate_snr_db(raw_wav)
@@ -177,7 +178,7 @@ def run_stage1(input_path, work_dir, input_kind):
     final_wav = raw_wav
     if snr is not None and snr < SNR_DENOISE_THRESHOLD_DB:
         denoised_wav = os.path.join(work_dir, "audio_denoised.wav")
-        apply_denoise(raw_wav, denoised_wav)
+        apply_denoise(raw_wav, denoised_wav, cancel_event)
         final_wav = denoised_wav
         result.denoise_applied = True
         result.warnings.append(

@@ -35,6 +35,7 @@ from config import (
 )
 
 from pipeline.stage3_segment_tm import Segment
+from pipeline.cancellation import check_cancelled, run_cancellable
 
 
 class NoVoiceoverContentError(RuntimeError):
@@ -49,12 +50,8 @@ class NoVoiceoverContentError(RuntimeError):
     """
 
 
-def _run(cmd):
-    proc = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+def _run(cmd, cancel_event=None):
+    proc = run_cancellable(cmd, cancel_event)
 
     if proc.returncode != 0:
         raise RuntimeError(
@@ -74,6 +71,7 @@ def burn_in_subtitles(
     video_path: str,
     srt_path: str,
     out_mp4_path: str,
+    cancel_event=None,
 ) -> str:
 
     escaped_srt = _escape_ffmpeg_filter_path(
@@ -92,7 +90,7 @@ def burn_in_subtitles(
         "-c:a",
         "copy",
         out_mp4_path,
-    ])
+    ], cancel_event)
 
     return out_mp4_path
 
@@ -1480,6 +1478,7 @@ def build_voiceover_track(
     target_lang: str,
     work_dir: str,
     speaker: Optional[str] = None,
+    cancel_event=None,
 ):
 
     tts_dir = os.path.join(
@@ -1547,6 +1546,8 @@ def build_voiceover_track(
 
     try:
         for seg in segments:
+
+            check_cancelled(cancel_event)
 
             text = (
                 seg.translated_text
@@ -2146,6 +2147,7 @@ def mux_voiceover_onto_video(
     out_mp4_path: str,
     mix_original_audio: bool = False,
     original_audio_gain_db: float = -18.0,
+    cancel_event=None,
 ) -> str:
 
     if mix_original_audio:
@@ -2175,7 +2177,7 @@ def mux_voiceover_onto_video(
             "-c:v",
             "copy",
             out_mp4_path,
-        ])
+        ], cancel_event)
 
     else:
 
@@ -2208,6 +2210,6 @@ def mux_voiceover_onto_video(
             "apad",
             "-shortest",
             out_mp4_path,
-        ])
+        ], cancel_event)
 
     return out_mp4_path
