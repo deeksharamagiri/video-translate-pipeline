@@ -74,10 +74,21 @@ source .venv/bin/activate
 python app.py
 ```
 
-Open **http://127.0.0.1:5000**. Upload a file, pick languages, tick the boxes
-you want, hit **Run Pipeline**. The first job that touches a given
-model/voice will pause while it downloads (progress prints to the terminal
-running `python app.py`); every job after that is fast and fully offline.
+Open **http://127.0.0.1:5000**. Upload a file, pick a target language, hit
+**Run Pipeline** (source language is always auto-detected; burned-in
+subtitles and voiceover are always produced for video input — there are
+no toggles for these in the current UI). The first job that touches a
+given model/voice will pause while it downloads (progress prints to the
+terminal running `python app.py`); every job after that is fast and
+fully offline.
+
+A running job can be stopped early with the **Cancel** button that
+appears next to Run Pipeline once a job starts. Cancellation is
+immediate — the whisper.cpp/ffmpeg subprocess currently running is
+killed directly rather than waited out, so it takes effect within about
+a second, not whenever the current stage would have finished on its own.
+The job's partial output under `jobs/<job_id>/` is rolled back
+automatically, the same as any other job failure.
 
 ## The one manual step: gated model access (IndicTrans2 + IndicConformer)
 
@@ -115,18 +126,26 @@ rather than failing the job.
 ## Testing checklist
 
 1. **Basic subtitle-only run**: upload a short MP3/WAV with no subtitle
-   track, leave both checkboxes off. Confirm you get SRT + VTT + DOCX report.
+   track. Audio input skips burned-in video and voiceover automatically
+   (both only apply when the input is a video) — confirm you get SRT +
+   VTT + DOCX report.
 2. **Video with embedded subtitles**: upload an MKV that already has a
    subtitle stream — confirm the UI shows "Skip ASR" and the process is
    much faster.
-3. **Burned-in + voiceover**: upload a short MP4, tick both boxes, confirm
-   you get 5 output files including two playable MP4s.
+3. **Burned-in + voiceover**: upload a short MP4 — both are produced
+   automatically for video input — confirm you get 5 output files
+   including two playable MP4s.
 4. **Cache reuse**: run the *same* file through twice with the same
    language pair — the second run's "Cache hits" stat should jump toward
-   100% and finish noticeably faster. Check the "Translation Memory — Recent
-   Jobs" table at the bottom of the page.
+   100%. There's no "Recent Jobs" UI for this yet; check
+   `curl http://127.0.0.1:5000/api/archive` instead.
 5. **Low-SNR audio**: try a noisy/quiet recording — the Job Report should
    show a denoise warning.
+6. **Cancel mid-job**: start a job on a real video/audio file and click
+   **Cancel** while it's mid-stage (e.g. during "Running speech
+   recognition..."). Confirm the UI shows "Pipeline cancelled." within a
+   second or two — not after however long that stage would otherwise
+   have taken to finish — and that `jobs/<job_id>/` was not left behind.
 
 ## Adding more Indic-TTS voices / languages
 
@@ -202,8 +221,10 @@ on by default:
 - **IndicConformer not improving transcripts / job report warns it fell
   back** — usually means the gated repo access or `HF_TOKEN` step above
   hasn't been done yet on this machine; the job still completes on the
-  whisper.cpp transcript alone. Uncheck "Refine transcript with
-  IndicConformer" in the UI to skip the extra pass entirely.
+  whisper.cpp transcript alone. There's no UI toggle for this currently
+  (the dashboard always requests it) — to skip IndicConformer entirely,
+  call `POST /api/upload` directly with `asr_engine=whisper` instead of
+  using the dashboard.
 - **Large files rejected** — limits are in `config.py` (`MAX_VIDEO_SIZE_MB`, `MAX_AUDIO_SIZE_MB`, durations) — raise them if your field files run longer than 15/30 minutes.
 - **Something failed mid-job** — check `jobs/pipeline.log` (also printed to
   the terminal) for the full traceback. A failed job's partial output
