@@ -84,6 +84,7 @@ from pipeline import (
 )
 
 from pipeline.logging_setup import get_logger
+from pipeline.cancellation import JobCancelled, check_cancelled
 
 
 log = get_logger("orchestrator")
@@ -720,6 +721,7 @@ def run_job(
     engine_override: str = "auto",
     asr_engine: str = "indic_conformer",
     tts_speaker: Optional[str] = None,
+    cancel_event=None,
 ) -> dict:
     """
     Runs one end-to-end job.
@@ -757,7 +759,22 @@ def run_job(
             engine_override,
             asr_engine,
             tts_speaker,
+            cancel_event,
         )
+
+    except JobCancelled:
+
+        log.info(
+            f"Job {job_id} cancelled by user -- "
+            f"rolling back partial output at {job_dir}"
+        )
+
+        shutil.rmtree(
+            job_dir,
+            ignore_errors=True,
+        )
+
+        raise
 
     except Exception:
 
@@ -796,6 +813,7 @@ def _run_job(
     engine_override: str = "auto",
     asr_engine: str = "indic_conformer",
     tts_speaker: Optional[str] = None,
+    cancel_event=None,
 ) -> dict:
 
     job_start = (
@@ -877,6 +895,7 @@ def _run_job(
                 local_input,
                 work_dir,
                 input_kind,
+                cancel_event=cancel_event,
             )
         )
 
@@ -925,6 +944,7 @@ def _run_job(
                 stage2_asr.run_stage2(
                     pre.audio_wav_path,
                     language_hint=source_lang_hint,
+                    cancel_event=cancel_event,
                 )
             )
 
@@ -991,8 +1011,13 @@ def _run_job(
                         asr_segments,
                         pre.audio_wav_path,
                         source_lang,
+                        cancel_event=cancel_event,
                     )
                 )
+
+        except JobCancelled:
+
+            raise
 
         except Exception as exc:
 
@@ -1441,6 +1466,7 @@ def _run_job(
                         target_lang,
                         work_dir,
                         speaker=tts_speaker,
+                        cancel_event=cancel_event,
                     )
 
             except delivery.NoVoiceoverContentError as exc:
@@ -1549,6 +1575,7 @@ def _run_job(
                         local_input,
                         voiceover_wav,
                         voiceover_path,
+                        cancel_event=cancel_event,
                     )
 
                 outputs_voiceover = (
@@ -1622,6 +1649,7 @@ def _run_job(
                 source_video,
                 burn_in_srt_path,
                 burned_path,
+                cancel_event=cancel_event,
             )
 
     # ========================================================

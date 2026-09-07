@@ -5,6 +5,7 @@ const dzFile = document.getElementById('dzFile');
 const dzFileName = document.getElementById('dzFileName');
 const dzClear = document.getElementById('dzClear');
 const submitBtn = document.getElementById('submitBtn');
+const cancelBtn = document.getElementById('cancelBtn');
 const formError = document.getElementById('formError');
 
 const progressBarInner = document.getElementById('progressBarInner');
@@ -15,6 +16,30 @@ const statsRow = document.getElementById('statsRow');
 const downloadsEl = document.getElementById('downloads');
 
 let selectedFile = null;
+let currentJobId = null;
+let isCancelling = false;
+
+
+// ============================================================
+// Reset the run button / cancel button back to idle
+// ============================================================
+
+function resetRunUI() {
+
+  submitBtn.disabled = false;
+
+  submitBtn.classList.remove(
+    'is-processing'
+  );
+
+  cancelBtn.hidden = true;
+
+  cancelBtn.disabled = false;
+
+  currentJobId = null;
+
+  isCancelling = false;
+}
 
 
 // ============================================================
@@ -227,6 +252,13 @@ submitBtn.addEventListener(
       resultsPanel.hidden =
         true;
 
+      currentJobId =
+        data.job_id;
+
+      cancelBtn.hidden = false;
+
+      cancelBtn.disabled = false;
+
       pollStatus(
         data.job_id
       );
@@ -238,12 +270,41 @@ submitBtn.addEventListener(
 
       formError.hidden = false;
 
-      submitBtn.disabled =
-        false;
+      resetRunUI();
+    }
+  }
+);
 
-      submitBtn.classList.remove(
-        'is-processing'
+
+// ============================================================
+// Cancel a running job
+// ============================================================
+
+cancelBtn.addEventListener(
+  'click',
+  async () => {
+
+    if (!currentJobId) {
+      return;
+    }
+
+    cancelBtn.disabled = true;
+
+    isCancelling = true;
+
+    progressMsg.textContent =
+      'Cancelling — stopping the running step...';
+
+    try {
+
+      await fetch(
+        `/api/cancel/${currentJobId}`,
+        { method: 'POST' }
       );
+
+    } catch (err) {
+
+      // The status poll will surface the final state regardless.
     }
   }
 );
@@ -273,7 +334,7 @@ function pollStatus(jobId) {
           // Progress
           // --------------------------------------------------
 
-          if (data.progress) {
+          if (data.progress && !isCancelling) {
 
             progressBarInner.style.width =
               `${data.progress.pct}%`;
@@ -283,6 +344,26 @@ function pollStatus(jobId) {
 
             progressPct.textContent =
               `${data.progress.pct}%`;
+          }
+
+          // --------------------------------------------------
+          // Cancelled
+          // --------------------------------------------------
+
+          if (data.cancelled) {
+
+            clearInterval(
+              interval
+            );
+
+            formError.textContent =
+              'Pipeline cancelled.';
+
+            formError.hidden = false;
+
+            resetRunUI();
+
+            return;
           }
 
           // --------------------------------------------------
@@ -300,12 +381,7 @@ function pollStatus(jobId) {
 
             formError.hidden = false;
 
-            submitBtn.disabled =
-              false;
-
-            submitBtn.classList.remove(
-              'is-processing'
-            );
+            resetRunUI();
 
             return;
           }
@@ -325,12 +401,7 @@ function pollStatus(jobId) {
               data.result
             );
 
-            submitBtn.disabled =
-              false;
-
-            submitBtn.classList.remove(
-              'is-processing'
-            );
+            resetRunUI();
           }
 
         } catch (err) {
@@ -344,12 +415,7 @@ function pollStatus(jobId) {
 
           formError.hidden = false;
 
-          submitBtn.disabled =
-            false;
-
-          submitBtn.classList.remove(
-            'is-processing'
-          );
+          resetRunUI();
         }
 
       },

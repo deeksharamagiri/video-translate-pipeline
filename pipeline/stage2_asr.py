@@ -53,6 +53,8 @@ from config import (
     INDIC_CONFORMER_LANG_MAP,
 )
 
+from pipeline.cancellation import check_cancelled, run_cancellable
+
 
 # ============================================================
 # Caches
@@ -1055,6 +1057,7 @@ def _build_whisper_command(
 def run_stage2(
     wav_path: str,
     language_hint: Optional[str] = None,
+    cancel_event=None,
 ) -> ASRResult:
     """
     Run whisper.cpp on a 16kHz mono WAV file.
@@ -1217,10 +1220,9 @@ def run_stage2(
 
         started = time.perf_counter()
 
-        proc = subprocess.run(
+        proc = run_cancellable(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            cancel_event,
         )
 
         elapsed = (
@@ -1892,6 +1894,7 @@ def refine_segments_with_indic_conformer(
     wav_path: str,
     language: str,
     decoding: Optional[str] = None,
+    cancel_event=None,
 ) -> List[TranscriptSegment]:
     """
     Optional post-pass using IndicConformer.
@@ -1951,6 +1954,8 @@ def refine_segments_with_indic_conformer(
         segments,
         start=1,
     ):
+
+        check_cancelled(cancel_event)
 
         start_sample = max(
             0,

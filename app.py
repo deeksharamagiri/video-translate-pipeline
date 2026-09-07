@@ -61,6 +61,10 @@ from pipeline.logging_setup import (
     get_logger,
 )
 
+from pipeline.cancellation import (
+    JobCancelled,
+)
+
 
 log = get_logger("app")
 
@@ -296,6 +300,10 @@ def upload():
             "result": None,
 
             "error": None,
+
+            "cancelled": False,
+
+            "cancel_event": threading.Event(),
         }
 
     log.info(
@@ -310,6 +318,14 @@ def upload():
     def _progress_cb(update):
 
         with JOBS_LOCK:
+
+            if JOBS[job_id][
+                "cancel_event"
+            ].is_set():
+
+                raise JobCancelled(
+                    "Cancelled by user."
+                )
 
             JOBS[job_id][
                 "progress"
@@ -333,6 +349,7 @@ def upload():
                 engine_override=engine_override,
                 asr_engine=asr_engine,
                 tts_speaker=tts_speaker,
+                cancel_event=JOBS[job_id]["cancel_event"],
             )
 
             with JOBS_LOCK:
@@ -340,6 +357,29 @@ def upload():
                 JOBS[job_id][
                     "result"
                 ] = result
+
+        except JobCancelled:
+
+            log.info(
+                f"Job {job_id} "
+                f"(upload {filename}) cancelled by user"
+            )
+
+            with JOBS_LOCK:
+
+                JOBS[job_id][
+                    "cancelled"
+                ] = True
+
+                JOBS[job_id][
+                    "progress"
+                ] = {
+                    "stage": "cancelled",
+                    "message": "Cancelled by user.",
+                    "pct": JOBS[job_id][
+                        "progress"
+                    ].get("pct", 0),
+                }
 
         except (
             JobError,
@@ -405,6 +445,14 @@ def status(job_id):
     }
 
     # --------------------------------------------------------
+    # Cancelled
+    # --------------------------------------------------------
+
+    if job["cancelled"]:
+
+        resp["cancelled"] = True
+
+    # --------------------------------------------------------
     # Error
     # --------------------------------------------------------
 
@@ -466,6 +514,52 @@ def status(job_id):
     return jsonify(
         resp
     )
+
+
+# ============================================================
+# Cancel a running job
+# ============================================================
+
+@app.route(
+    "/api/cancel/<job_id>",
+    methods=["POST"],
+)
+def cancel(job_id):
+
+    with JOBS_LOCK:
+
+        job = JOBS.get(
+            job_id
+        )
+
+        if job is None:
+
+            return jsonify({
+                "error": "Unknown job_id"
+            }), 404
+
+        if (
+            job["result"]
+            or job["error"]
+            or job["cancelled"]
+        ):
+
+            return jsonify({
+                "error": (
+                    "Job has already "
+                    "finished."
+                )
+            }), 400
+
+        job["cancel_event"].set()
+
+    log.info(
+        f"Cancel requested for job {job_id}"
+    )
+
+    return jsonify({
+        "ok": True
+    })
 
 
 # ============================================================
