@@ -60,7 +60,9 @@ weights but not for an API token. The secret is only available to the one
 Expect this to take a while the first time -- it compiles whisper.cpp
 from source and downloads several GB of model weights (NLLB ~2.4GB,
 IndicTrans2 dist checkpoints ~1GB combined, Indic-TTS Hindi voice
-~1.5GB, whisper.cpp's ggml-medium-q5_0 ~514MB).
+~1.5GB, whisper.cpp's ggml-medium-q5_0 ~514MB, IndicConformer ~2.4GB --
+baked in because it's the ASR engine the web UI always requests by
+default, not an opt-in extra).
 
 **Verify it built correctly** before moving on:
 
