@@ -1,99 +1,303 @@
-# Handover & Runbook
+# System Handover Document
 
-This document is for whoever owns/operates this tool after the build team
-hands it off — it assumes no prior context beyond `README.md` (setup) and
-`DEMO.md` (a guided walkthrough). For deploying to a separate, offline
-machine (no native Python/ffmpeg/whisper.cpp setup on that machine, and no
-internet there at all), see `DOCKER.md` instead of the steps below, which
-describe a native (non-Docker) install.
+| | |
+|---|---|
+| **System name** | Offline Field Translator (Video/Audio Translation Pipeline) |
+| **Prepared for** | BAIF |
+| **Document type** | Operational Handover & Runbook |
+| **Version** | 1.0 |
+| **Status** | Ready for handover |
 
-## What this is
+This document is written for whoever takes ownership of operating and
+supporting this system after the build team hands it off. It assumes no
+prior involvement in building the system — only familiarity with running
+software on a laptop. Setup instructions and a guided demo walkthrough
+exist as separate companion documents (the Setup Guide and the Demo
+Script); this document covers everything needed to **own, run, and
+support** the system day to day.
 
-A local, offline-first web app that takes a video/audio recording and
-produces: subtitles (SRT/VTT), an optional dubbed voiceover MP4, an
-optional burned-in-subtitle MP4, and a DOCX quality report — for one of 22
-Indian languages. It's designed to run on a single laptop in the field with
-no internet connection required *after* first-time model downloads.
+---
 
-## Ownership model
+## 1. Purpose & Scope
 
-- **Runs locally, per machine.** There is no shared server or database —
-  each install has its own `data/translation_memory.db` (cache + reuse
-  history) and `jobs/` directory (per-job output + logs). Nothing is
-  synced between machines.
-- **No accounts, no auth.** `app.py` binds to `127.0.0.1` only
-  (`config.HOST`) — it is not exposed to the network by default. If you
-  need it reachable from other devices on the same LAN, change `HOST` in
-  `config.py`, but understand there is no authentication layer at all.
-- **Models are cached locally** under `models/` and inside each Python
-  environment's Hugging Face cache — reinstalling the app on a new machine
-  means re-downloading them (multiple GB).
+The system converts a field-recorded video or audio file into translated,
+usable outputs for outreach and training purposes — without requiring an
+internet connection at the point of use. It was built to remove the
+dependency on external translation services or connectivity when working
+in the field.
 
-## Support runbook
+**In scope:**
+- Translating spoken content from a recording into any of 22 Indian
+  languages.
+- Producing subtitles, a dubbed voiceover, a captioned video, and a
+  written transcript from a single upload.
+- Running entirely on one laptop, with no ongoing internet requirement
+  after initial setup.
 
-**Where to look when something goes wrong:**
+**Out of scope:**
+- Multi-user or networked operation (see Section 3).
+- Real-time/live translation (the system processes recorded files only).
+- Human review or certification of translation quality — outputs are
+  machine-generated and should be spot-checked per Section 7.
 
-1. `jobs/pipeline.log` — job lifecycle events (start/finish/fail) with full
-   tracebacks on failure. Rotates automatically (5MB × 3 backups).
-2. The terminal running `python app.py` — same information, plus the
-   per-stage timing breakdown for the most recent job and the detailed
-   per-stage `print()` diagnostics from ASR/translation/TTS.
-3. The Job Report DOCX for a specific job (`jobs/<job_id>/output/*_job_report.docx`)
-   — per-segment quality/warnings for that job specifically.
+---
 
-**Common failure modes and fixes:**
+## 2. System Overview
 
-| Symptom | Likely cause | Fix |
+A user uploads a video or audio recording through a simple web page
+running on their own laptop, selects a target language, and starts the
+job. The system then automatically:
+
+1. Extracts and cleans the audio (removing background noise where needed).
+2. Transcribes the spoken content, with timing for each phrase.
+3. Translates the transcript into the selected language, using
+   translation memory to avoid re-translating repeated content across
+   jobs.
+4. Produces:
+   - Subtitle files (for use with standard video players),
+   - A written transcript document,
+   - A video with subtitles burned directly into the picture,
+   - A dubbed voiceover track replacing the original audio,
+   - A quality report summarising confidence levels and any issues found.
+
+A job typically completes in a few minutes, depending on the length of
+the recording and the machine's processing power. Every job's outputs are
+saved to that machine's local storage and are ready for transfer to a USB
+drive or shared folder for distribution.
+
+---
+
+## 3. Ownership & Responsibility Model
+
+- **Deployment unit**: one installation per laptop. There is no shared
+  server, central database, or cloud component — each machine operates
+  independently.
+- **Users**: designed for a single operator per machine, working through
+  the web page in a browser on that same laptop. It is not intended to
+  be accessed by other devices over a network or the internet.
+- **Access control**: there are no user accounts or logins. Anyone with
+  access to the laptop can use the tool. If this needs to change (e.g.
+  shared office use), that is a configuration change the technical
+  point of contact can make — see Section 9.
+- **Data ownership**: all translation history and output files reside
+  only on the machine that produced them. Nothing is transmitted
+  elsewhere during normal operation.
+
+---
+
+## 4. How the System Works (Architecture Summary)
+
+For anyone who needs a working mental model without technical depth, the
+system processes each job through five stages:
+
+| Stage | What happens |
+|---|---|
+| 1. Preparation | Audio is extracted from the upload and cleaned up (noise reduction applied automatically if the recording is unclear). |
+| 2. Transcription | Spoken words are converted to timestamped text. |
+| 3. Translation | Text is translated into the target language, reusing previously translated phrases where possible. |
+| 4. Output generation | Subtitles, transcript, dubbed audio, and captioned video are produced. |
+| 5. Quality check & archive | Each job is scored for translation confidence and completeness, and the translated content is saved for reuse in future jobs. |
+
+Every job also produces a **Quality Report** (a document) summarising how
+confident the system was in the transcription and translation, and
+flagging anything that may need manual review — for example, a noisy
+section of audio, or a phrase the system could not translate. This report
+is the first place to check when assessing whether a specific job's
+output can be trusted as-is or should be reviewed by a human before
+distribution.
+
+---
+
+## 5. Operations & Support Runbook
+
+**Where to look when something goes wrong, in order:**
+
+1. **The activity log** — a running record of every job (start, finish,
+   failure) with full technical detail on any failure. This is the
+   single most useful place to diagnose an issue.
+2. **The terminal/console window** the application is running in — shows
+   the same information live, plus a timing breakdown for whichever job
+   most recently ran.
+3. **The Quality Report** for a specific job — per-job detail on
+   confidence scores and warnings, useful when a specific output looks
+   wrong but the system otherwise ran fine.
+
+**Common issues and how to resolve them:**
+
+| Symptom | Likely cause | What to do |
 |---|---|---|
-| Job fails immediately with a gated-model error | IndicTrans2 access not accepted / `HF_TOKEN` not set | See README "The one manual step" |
-| Voiceover silently skipped, warning in report | Target language has no Indic-TTS checkpoint yet | Expected for 9 of the 22 languages — see README "Adding more Indic-TTS voices" |
-| Voiceover fails outright (not skipped) | `.venv-tts` never set up | Run the one-time `.venv-tts` setup in README |
-| Upload rejected | File over size/duration/format limits | Limits are in `config.py` — raise `MAX_VIDEO_SIZE_MB` etc. if field files are routinely larger |
-| Whole job fails with a traceback | Check `jobs/pipeline.log` for the actual exception | Partial output for that job is auto-deleted (see Rollback below) — safe to just retry |
-| App won't start | Python/ffmpeg/venv issue | Re-run `setup-mac.sh` (macOS) or the manual `Setup` steps in README |
+| A job fails immediately with an access/permission error | One of the translation models requires a one-time, free account approval that hasn't been completed on this machine yet | Follow the one-time model access step in the Setup Guide |
+| Dubbed voiceover is skipped, with a warning in the report | The selected target language doesn't yet have a voice available | Expected for some of the 22 supported languages; subtitles are still produced normally. Additional voices can be added later — see Section 9 |
+| Voiceover fails outright rather than being skipped | The voiceover component hasn't been set up on this machine | Complete the one-time voiceover setup step in the Setup Guide |
+| A file is rejected on upload | The file exceeds the configured size or length limit | Limits can be raised by the technical point of contact if field recordings are routinely longer |
+| A job fails with a technical error | Check the activity log for the specific cause | The system automatically removes any partial/incomplete output from a failed job — see "Rollback behaviour" below. It is always safe to simply try again |
+| The application won't start at all | Underlying software environment issue | Re-run the initial setup steps in the Setup Guide |
 
-**Rollback behavior:** if any pipeline stage raises an exception, the
-partially-written `jobs/<job_id>/` directory for that job is automatically
-deleted (`pipeline/orchestrator.py`) — a failed run never leaves half-built
-output behind that could be mistaken for a completed job. The failure
-itself is still fully logged (see above) before the directory is removed,
-so the cause isn't lost, only the incomplete artifacts are.
+**Rollback behaviour:** if any stage of a job fails for any reason, the
+system automatically deletes that job's partial output rather than
+leaving an incomplete or corrupted result behind that could be mistaken
+for a finished one. The failure is fully recorded in the activity log
+before anything is removed, so the cause is never lost — only the
+unfinished files are cleaned up.
 
-**Restarting the app:** it has no persistent server state beyond the
-SQLite cache and `jobs/` output — killing and re-running `python app.py`
-(or `./run-mac.sh`) is always safe. In-flight jobs at the time of a
-restart are lost (not resumed) and should just be re-run.
+**Cancelling a job:** an in-progress job can be stopped manually; the
+system responds within about a second and cleans up any partial output
+the same way a failed job would be cleaned up.
 
-**Backing up / migrating to a new machine:** copy `data/` (translation
-memory + glossary) and, if you want job history preserved, `jobs/`. Models
-under `models/` and the Hugging Face caches will simply re-download on
-first use on the new machine — nothing there needs to be copied unless
-avoiding re-download matters more than disk space.
+**Restarting the application:** the system holds no state in memory
+between restarts beyond what is already saved to disk (translation
+history and completed job outputs). Stopping and restarting the
+application is always safe. Any job that was actively running at the
+moment of a restart is lost and should simply be re-run — it will not
+resume automatically.
 
-## Adoption approach for BAIF
+---
 
-1. **Pilot on already-available clips** — run 3-5 real field clips through
-   using the manual testing checklist in `README.md` before wider rollout,
-   so any language- or content-specific issues surface early.
-2. **One machine, one operator, per field site** — the tool is designed
-   for a single laptop; it does not currently support multiple concurrent
-   operators sharing one install over a network.
-3. **Train operators on**: the upload → language selection → download flow
-   (see `DEMO.md`), reading the Job Report's warnings section, and where
-   to find `jobs/pipeline.log` if a job fails and needs escalation.
-4. **Extend coverage over time**: adding a new voiceover language or a
-   glossary term (see README) doesn't require a code change — both are
-   config/data edits an operator's technical point of contact can make
-   without redeploying.
+## 6. Data Management
 
-## Automated test coverage
+- **What is stored locally**: a translation history/cache (so repeated
+  phrases across jobs translate faster and more cheaply over time), a
+  glossary of protected terms (Section 9), and the output files for
+  every job that has been run.
+- **Backing up**: to preserve translation history and glossary terms,
+  back up the system's data folder. To also preserve past job outputs
+  for record-keeping, back up the jobs folder as well.
+- **Migrating to a new machine**: the data and job folders above can be
+  copied directly to a new installation. The underlying language models
+  do not need to be copied — they will download automatically the first
+  time each is used on the new machine (see Section 8 for a fully
+  offline alternative that avoids this).
+- **Retention**: there is no automatic deletion of old job output. If
+  disk space becomes a concern over time, older job folders can be
+  archived or removed manually — this does not affect the translation
+  history cache.
 
-`tests/` (run via `pytest`, see README "Running tests") covers the logic
-most likely to silently regress: translation-engine routing rules,
-translation-memory cache hit/miss behavior, numeric-preservation quality
-scoring, SRT parsing for the "skip ASR" path, and the rollback behavior
-described above. It intentionally does not run ASR/translation/TTS model
-inference itself (that needs multi-GB model downloads and is exercised by
-the manual checklist instead) — so a green test run means the routing and
-bookkeeping logic is intact, not that translation quality on a given clip
-is good.
+---
+
+## 7. Known Limitations & Risks
+
+- **Machine-generated output requires spot-checking.** Translation and
+  transcription quality vary by recording clarity, background noise, and
+  language. The per-job Quality Report should be reviewed before
+  distributing sensitive or high-stakes content, particularly where the
+  report flags low confidence.
+- **No built-in human review workflow.** Approving content for
+  distribution is a manual process today; this system does not gate or
+  route outputs for sign-off.
+- **Single-operator design.** The system is not built for multiple people
+  to use the same installation concurrently over a network.
+- **Some languages have partial voice support.** All 22 supported
+  languages produce subtitles and transcripts; dubbed voiceover is
+  currently available for a subset of them (see Section 9 to extend
+  this).
+- **First-time setup requires internet.** Ongoing day-to-day use does
+  not, but the initial installation and first use of each language
+  /feature needs a one-time internet connection to download the required
+  components.
+
+---
+
+## 8. Deployment Options
+
+Two ways to get the system running are available, chosen based on the
+target machine:
+
+1. **Standard installation** — for a machine that already has a general
+   software development environment available. Setup takes a small
+   number of steps, detailed in the Setup Guide, and downloads what it
+   needs automatically on first use.
+2. **Fully self-contained package** — for a machine with no existing
+   development environment and no internet access at all, intended for
+   field deployment. Everything the system needs is bundled in advance
+   on a machine that does have internet, then transferred and run
+   entirely offline on the target machine. This option is prepared and
+   maintained by the technical point of contact and is available as a
+   separate packaged build on request.
+
+Both options result in the same system with the same capabilities; the
+choice only affects how it gets installed.
+
+---
+
+## 9. Maintenance & Extensibility
+
+The following can be done by a non-developer technical point of contact,
+without any code changes or redeployment:
+
+- **Adding a protected term** (e.g. an organisation name, a technical
+  term that should never be freely translated): add it to the glossary
+  data file with its exact translation for each language. Once added, it
+  is guaranteed to be used consistently rather than left to the
+  translation model's judgement.
+- **Adding voiceover support for an additional language**: register the
+  new language in the voice-language configuration; the corresponding
+  voice data downloads automatically the first time it's used. Requesting
+  voiceover for a language without a registered voice does not fail a
+  job — it is skipped with a note in that job's Quality Report, and
+  subtitles are still produced normally.
+- **Raising upload size/length limits**: adjustable in the system's
+  configuration file if field recordings routinely exceed the current
+  limits.
+
+Anything beyond the above (e.g. adding a new pipeline stage, changing
+core translation logic) should go back to the build/technical team.
+
+---
+
+## 10. Adoption Plan for BAIF
+
+1. **Pilot phase** — run 3–5 real field recordings through the system
+   using the manual testing checklist in the Setup Guide before wider
+   rollout, so that any language- or content-specific issues surface
+   early, on known material.
+2. **Deployment model** — one machine, one operator, per field site. The
+   system is not designed for multiple concurrent operators sharing a
+   single installation over a network.
+3. **Operator training should cover**:
+   - The upload → language selection → download workflow (the Demo
+     Script provides a guided walkthrough).
+   - How to read the Quality Report's warnings section before
+     distributing an output.
+   - Where to find the activity log and what to send to the technical
+     point of contact if a job fails and needs escalation.
+4. **Extending coverage over time** — adding a new voiceover language or
+   a glossary term (Section 9) is a configuration change an operator's
+   technical point of contact can make without any redeployment or
+   specialist involvement.
+
+---
+
+## 11. Support Escalation Path
+
+| Level | Who | When |
+|---|---|---|
+| 1 | Trained operator | Day-to-day use; reading Quality Report warnings; retrying a failed job |
+| 2 | Site technical point of contact | Configuration changes (Section 9), setup issues, interpreting the activity log |
+| 3 | Build/technical team | Failures not resolved by the activity log's guidance, or requests for new capabilities |
+
+When escalating to Level 3, include: the job ID (if available), the
+relevant section of the activity log, and the input file's format and
+approximate length — this is normally enough to diagnose an issue without
+needing the machine itself.
+
+---
+
+## Appendix A: Key File & Folder Reference
+
+| Item | Location | Purpose |
+|---|---|---|
+| Translation history / glossary | System's data folder | Cache of past translations and protected terms |
+| Job outputs | System's jobs folder, one subfolder per job | All generated files for a completed job |
+| Activity log | Inside the jobs folder | Full job history and failure diagnostics |
+| Per-job Quality Report | Inside each job's output subfolder | Confidence scores and warnings for that specific job |
+
+## Appendix B: Glossary of Terms
+
+| Term | Meaning |
+|---|---|
+| Job | One complete run of the system against a single uploaded file |
+| Translation memory | The cache of previously translated phrases, reused to save time on repeat content |
+| Quality Report | The per-job document summarising confidence and flagging issues |
+| Voiceover | The dubbed audio track generated to replace the original spoken audio |
+| Burned-in subtitles | Subtitles rendered directly into the video picture, rather than as a separate file |
+| Rollback | Automatic removal of incomplete output after a failed job |
