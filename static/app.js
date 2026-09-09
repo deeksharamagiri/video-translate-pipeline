@@ -21,6 +21,81 @@ let isCancelling = false;
 
 
 // ============================================================
+// PAGE REFRESH / LEAVE PROTECTION
+// ============================================================
+//
+// While a translation is running, the browser will ask the
+// user for confirmation if they:
+//
+//   - Refresh the page
+//   - Close the tab
+//   - Close the browser window
+//   - Navigate away from the page
+//   - Press Back / Forward
+//
+// The browser controls the exact wording of the popup.
+//
+// The warning is ONLY enabled after the backend has accepted
+// the translation job.
+//
+// It is disabled when the job:
+//
+//   - Completes
+//   - Is cancelled
+//   - Fails
+// ============================================================
+
+let jobIsRunning = false;
+
+
+// ------------------------------------------------------------
+// Enable warning
+// ------------------------------------------------------------
+
+function enablePageLeaveWarning() {
+
+  jobIsRunning = true;
+
+}
+
+
+// ------------------------------------------------------------
+// Disable warning
+// ------------------------------------------------------------
+
+function disablePageLeaveWarning() {
+
+  jobIsRunning = false;
+
+}
+
+
+// ------------------------------------------------------------
+// Browser refresh / close / navigation handler
+// ------------------------------------------------------------
+
+window.addEventListener(
+  'beforeunload',
+  (event) => {
+
+    if (!jobIsRunning) {
+      return;
+    }
+
+    // Required by modern browsers.
+    //
+    // The browser will display its own native confirmation
+    // dialog. Custom text is intentionally not supplied because
+    // modern browsers ignore custom beforeunload messages.
+    event.preventDefault();
+
+    event.returnValue = '';
+
+  }
+);
+
+
+// ============================================================
 // Reset the run button / cancel button back to idle
 // ============================================================
 
@@ -39,6 +114,7 @@ function resetRunUI() {
   currentJobId = null;
 
   isCancelling = false;
+
 }
 
 
@@ -55,8 +131,13 @@ dropzone.addEventListener(
 dropzone.addEventListener(
   'dragover',
   (e) => {
+
     e.preventDefault();
-    dropzone.classList.add('dragover');
+
+    dropzone.classList.add(
+      'dragover'
+    );
+
   }
 );
 
@@ -64,7 +145,11 @@ dropzone.addEventListener(
 dropzone.addEventListener(
   'dragleave',
   () => {
-    dropzone.classList.remove('dragover');
+
+    dropzone.classList.remove(
+      'dragover'
+    );
+
   }
 );
 
@@ -86,7 +171,9 @@ dropzone.addEventListener(
       setFile(
         e.dataTransfer.files[0]
       );
+
     }
+
   }
 );
 
@@ -102,7 +189,9 @@ fileInput.addEventListener(
       setFile(
         fileInput.files[0]
       );
+
     }
+
   }
 );
 
@@ -126,6 +215,7 @@ dzClear.addEventListener(
     dzFile.hidden = true;
 
     submitBtn.disabled = true;
+
   }
 );
 
@@ -151,6 +241,7 @@ function setFile(file) {
   submitBtn.disabled = false;
 
   formError.hidden = true;
+
 }
 
 
@@ -183,18 +274,22 @@ submitBtn.addEventListener(
     progressBarInner.style.width =
       '0%';
 
+
     const fd =
       new FormData();
+
 
     fd.append(
       'file',
       selectedFile
     );
 
+
     fd.append(
       'source_lang',
       ''
     );
+
 
     fd.append(
       'target_lang',
@@ -202,6 +297,7 @@ submitBtn.addEventListener(
         'targetLang'
       ).value
     );
+
 
     // --------------------------------------------------------
     // Always request both required outputs.
@@ -212,20 +308,24 @@ submitBtn.addEventListener(
       'true'
     );
 
+
     fd.append(
       'voiceover',
       'true'
     );
+
 
     fd.append(
       'engine',
       'auto'
     );
 
+
     fd.append(
       'asr_engine',
       'indic_conformer'
     );
+
 
     try {
 
@@ -238,8 +338,10 @@ submitBtn.addEventListener(
           }
         );
 
+
       const data =
         await res.json();
+
 
       if (!res.ok) {
 
@@ -247,31 +349,61 @@ submitBtn.addEventListener(
           data.error ||
           'Upload failed.'
         );
+
       }
+
+
+      // ------------------------------------------------------
+      // IMPORTANT:
+      //
+      // The job now exists on the Flask backend.
+      //
+      // From this point onward, warn the user before they
+      // refresh or leave the page.
+      // ------------------------------------------------------
+
+      enablePageLeaveWarning();
+
 
       resultsPanel.hidden =
         true;
 
+
       currentJobId =
         data.job_id;
 
-      cancelBtn.hidden = false;
 
-      cancelBtn.disabled = false;
+      cancelBtn.hidden =
+        false;
+
+
+      cancelBtn.disabled =
+        false;
+
 
       pollStatus(
         data.job_id
       );
 
+
     } catch (err) {
+
+      // The upload failed, so no backend job is running.
+      disablePageLeaveWarning();
+
 
       formError.textContent =
         err.message;
 
-      formError.hidden = false;
+
+      formError.hidden =
+        false;
+
 
       resetRunUI();
+
     }
+
   }
 );
 
@@ -288,24 +420,70 @@ cancelBtn.addEventListener(
       return;
     }
 
-    cancelBtn.disabled = true;
 
-    isCancelling = true;
+    cancelBtn.disabled =
+      true;
+
+
+    isCancelling =
+      true;
+
 
     progressMsg.textContent =
       'Cancelling — stopping the running step...';
 
+
     try {
 
-      await fetch(
-        `/api/cancel/${currentJobId}`,
-        { method: 'POST' }
-      );
+      const res =
+        await fetch(
+          `/api/cancel/${currentJobId}`,
+          {
+            method: 'POST'
+          }
+        );
+
+
+      const data =
+        await res.json();
+
+
+      // ------------------------------------------------------
+      // If the backend successfully accepted the cancellation
+      // request, keep the page-leave warning enabled until
+      // the status endpoint confirms that the job is actually
+      // cancelled.
+      // ------------------------------------------------------
+
+      if (!res.ok) {
+
+        throw new Error(
+          data.error ||
+          'Unable to cancel the job.'
+        );
+
+      }
+
 
     } catch (err) {
 
-      // The status poll will surface the final state regardless.
+      // Cancellation request itself failed.
+      //
+      // The job may still be running, so KEEP the page-leave
+      // warning enabled.
+      isCancelling = false;
+
+      cancelBtn.disabled =
+        false;
+
+      formError.textContent =
+        `Cancel error: ${err.message}`;
+
+      formError.hidden =
+        false;
+
     }
+
   }
 );
 
@@ -327,24 +505,33 @@ function pollStatus(jobId) {
               `/api/status/${jobId}`
             );
 
+
           const data =
             await res.json();
+
 
           // --------------------------------------------------
           // Progress
           // --------------------------------------------------
 
-          if (data.progress && !isCancelling) {
+          if (
+            data.progress &&
+            !isCancelling
+          ) {
 
             progressBarInner.style.width =
               `${data.progress.pct}%`;
 
+
             progressMsg.textContent =
               data.progress.message;
 
+
             progressPct.textContent =
               `${data.progress.pct}%`;
+
           }
+
 
           // --------------------------------------------------
           // Cancelled
@@ -356,15 +543,27 @@ function pollStatus(jobId) {
               interval
             );
 
+
+            // The backend confirmed that the pipeline
+            // has stopped.
+            disablePageLeaveWarning();
+
+
             formError.textContent =
               'Pipeline cancelled.';
 
-            formError.hidden = false;
+
+            formError.hidden =
+              false;
+
 
             resetRunUI();
 
+
             return;
+
           }
+
 
           // --------------------------------------------------
           // Error
@@ -376,15 +575,26 @@ function pollStatus(jobId) {
               interval
             );
 
+
+            // The backend reported a terminal error.
+            disablePageLeaveWarning();
+
+
             formError.textContent =
               `Error: ${data.error}`;
 
-            formError.hidden = false;
+
+            formError.hidden =
+              false;
+
 
             resetRunUI();
 
+
             return;
+
           }
+
 
           // --------------------------------------------------
           // Completed
@@ -396,12 +606,23 @@ function pollStatus(jobId) {
               interval
             );
 
+
+            // The backend confirmed completion.
+            // Refreshing is now safe.
+            disablePageLeaveWarning();
+
+
             renderResults(
               jobId,
               data.result
             );
 
+
             resetRunUI();
+
+
+            return;
+
           }
 
         } catch (err) {
@@ -410,17 +631,56 @@ function pollStatus(jobId) {
             interval
           );
 
+
+          // --------------------------------------------------
+          // IMPORTANT:
+          //
+          // DO NOT disable the page-leave warning here.
+          //
+          // A network/polling error does NOT prove that the
+          // backend pipeline stopped. The Flask worker could
+          // still be processing the video.
+          //
+          // Therefore we keep jobIsRunning = true.
+          // --------------------------------------------------
+
           formError.textContent =
             `Connection error: ${err.message}`;
 
-          formError.hidden = false;
 
-          resetRunUI();
+          formError.hidden =
+            false;
+
+
+          submitBtn.disabled =
+            false;
+
+
+          submitBtn.classList.remove(
+            'is-processing'
+          );
+
+
+          cancelBtn.hidden =
+            false;
+
+
+          cancelBtn.disabled =
+            false;
+
+
+          // Keep currentJobId so the user can continue
+          // attempting to interact with the running job.
+
+
+          return;
+
         }
 
       },
       1200
     );
+
 }
 
 
@@ -458,6 +718,7 @@ const DOWNLOAD_META = {
 
     desc:
       'Translated voiceover with subtitles burned into the video',
+
   },
 
 
@@ -472,7 +733,9 @@ const DOWNLOAD_META = {
 
     desc:
       'Translated subtitles with timestamps',
+
   },
+
 };
 
 
@@ -485,6 +748,7 @@ const DOWNLOAD_ORDER = [
   'burned_in_mp4',
 
   'subtitles_pdf',
+
 ];
 
 
@@ -541,6 +805,7 @@ const LANG_NAMES = {
   rus: 'Russian',
 
   jpn: 'Japanese',
+
 };
 
 
@@ -553,14 +818,18 @@ function renderResults(
   result
 ) {
 
-  resultsPanel.hidden = false;
+  resultsPanel.hidden =
+    false;
+
 
   const s =
     result.stats;
 
+
   const srcName =
     LANG_NAMES[s.source_lang] ||
     s.source_lang;
+
 
   const tgtName =
     LANG_NAMES[s.target_lang] ||
@@ -610,7 +879,8 @@ function renderResults(
   // Clear previous download cards
   // ==========================================================
 
-  downloadsEl.innerHTML = '';
+  downloadsEl.innerHTML =
+    '';
 
 
   // ==========================================================
@@ -633,6 +903,7 @@ function renderResults(
       ) {
 
         return;
+
       }
 
 
@@ -653,6 +924,7 @@ function renderResults(
         document.createElement(
           'div'
         );
+
 
       card.className =
         'dl-card';
@@ -691,6 +963,8 @@ function renderResults(
       downloadsEl.appendChild(
         card
       );
+
     }
   );
+
 }
