@@ -206,16 +206,35 @@ target machine:
    software development environment available. Setup takes a small
    number of steps, detailed in the Setup Guide, and downloads what it
    needs automatically on first use.
-2. **Fully self-contained package** — for a machine with no existing
-   development environment and no internet access at all, intended for
-   field deployment. Everything the system needs is bundled in advance
-   on a machine that does have internet, then transferred and run
-   entirely offline on the target machine. This option is prepared and
-   maintained by the technical point of contact and is available as a
-   separate packaged build on request.
+2. **Containerized offline package (Docker)** — for a machine with no
+   existing development environment and no internet access at all,
+   intended for field deployment. The entire system — including every
+   speech-recognition, translation, and voice model it depends on — is
+   packaged in advance into a single, self-contained **Docker container
+   image** on a machine that has internet access. That image is then
+   transferred to the target machine (e.g. via USB) and run there with
+   Docker as the only prerequisite; no Python, no model downloads, and
+   no internet connection are needed on the field machine itself.
 
 Both options result in the same system with the same capabilities; the
-choice only affects how it gets installed.
+choice only affects how it gets installed. The containerized package is
+the recommended path for field deployment specifically because it
+removes environment drift: the same image produces an identical, working
+installation on every machine it's loaded onto, rather than depending on
+what happens to already be installed there.
+
+**What this means in practice for the Deployment criteria:**
+
+| Aspect | Standard installation | Containerized (Docker) package |
+|---|---|---|
+| Target machine prerequisites | A general software development environment | Docker only |
+| Internet required at deployment site | Yes, for first-time model downloads | No — fully offline |
+| Setup time on target machine | A short list of setup steps | Load the pre-built image and start it — a matter of minutes |
+| Repeatability | Consistent, but depends on the target machine's existing environment | Identical on every machine, by construction |
+| Format | Source installation | A single portable image file, transferable on a USB drive or external disk |
+
+This option is prepared and maintained by the technical point of contact
+and is available as a separate packaged build on request.
 
 ---
 
@@ -254,12 +273,11 @@ core translation logic) should go back to the build/technical team.
    system is not designed for multiple concurrent operators sharing a
    single installation over a network.
 3. **Operator training should cover**:
-   - The upload → language selection → download workflow (the Demo
-     Script provides a guided walkthrough).
-   - How to read the Quality Report's warnings section before
-     distributing an output.
-   - Where to find the activity log and what to send to the technical
-     point of contact if a job fails and needs escalation.
+   - The upload → language selection → download workflow through the web
+     page (the Demo Script provides a guided walkthrough). Note that the
+     web page itself only ever offers two downloads — the captioned
+     video and the subtitle PDF
+   - How to open the job's output folder directly on the laptop
 4. **Extending coverage over time** — adding a new voiceover language or
    a glossary term (Section 9) is a configuration change an operator's
    technical point of contact can make without any redeployment or
